@@ -1,0 +1,10 @@
+services:
+  bff-backoffice:
+    container_name: bff_backoffice_dev
+    build:
+      context: ./src
+      dockerfile: Dockerfile
+    env_file:
+      - ./src/.env
+    ports:
+      - "7011:7011"
