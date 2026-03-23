@@ -1,0 +1,36 @@
+FROM node:20-bookworm-slim AS deps
+WORKDIR /workspace
+
+COPY contracts-and-schemas /workspace/contracts-and-schemas
+COPY shared-sdk-client/typescript /workspace/shared-sdk-client/typescript
+
+WORKDIR /workspace/shared-sdk-client/typescript
+RUN npm install && npm run build
+
+WORKDIR /workspace/bff-backoffice
+COPY bff-backoffice/src/package.json bff-backoffice/src/package-lock.json* ./
+RUN npm install && \
+	rm -rf node_modules/@axiomnode/shared-sdk-client && \
+	mkdir -p node_modules/@axiomnode && \
+	cp -R /workspace/shared-sdk-client/typescript node_modules/@axiomnode/shared-sdk-client
+
+FROM node:20-bookworm-slim AS build
+WORKDIR /workspace/bff-backoffice
+COPY --from=deps /workspace/shared-sdk-client/typescript /workspace/shared-sdk-client/typescript
+COPY --from=deps /workspace/bff-backoffice/node_modules ./node_modules
+COPY bff-backoffice/src/package.json ./package.json
+COPY bff-backoffice/src/package-lock.json ./package-lock.json
+COPY bff-backoffice/src/app ./app
+COPY bff-backoffice/src/tsconfig.json ./tsconfig.json
+COPY bff-backoffice/src/.env.example ./.env.example
+RUN npm run build
+
+FROM node:20-bookworm-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=deps /workspace/shared-sdk-client/typescript /workspace/shared-sdk-client/typescript
+COPY --from=build /workspace/bff-backoffice/node_modules ./node_modules
+COPY --from=build /workspace/bff-backoffice/dist ./dist
+COPY --from=build /workspace/bff-backoffice/.env.example ./.env.example
+EXPOSE 7011
+CMD ["node", "dist/app/server.js"]

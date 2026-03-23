@@ -4,6 +4,7 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 
 import { loadConfig } from "./config.js";
+import { backofficeRoutes } from "./routes/backoffice.js";
 import { healthRoutes } from "./routes/health.js";
 
 async function buildServer() {
@@ -14,6 +15,7 @@ async function buildServer() {
   await app.register(cors, { origin: allowedOrigins });
 
   await healthRoutes(app);
+  await backofficeRoutes(app, config);
 
   return { app, config };
 }

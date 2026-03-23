@@ -1,0 +1,9 @@
+src/node_modules/
+src/dist/
+*.log
+
+# Local secrets
+src/.env
+src/.env.*
+!src/.env.example
+src/.env.secrets

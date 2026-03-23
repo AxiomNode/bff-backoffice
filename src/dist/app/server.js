@@ -2,6 +2,7 @@ import "dotenv/config";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { loadConfig } from "./config.js";
+import { backofficeRoutes } from "./routes/backoffice.js";
 import { healthRoutes } from "./routes/health.js";
 async function buildServer() {
     const config = loadConfig();
@@ -9,6 +10,7 @@ async function buildServer() {
     const allowedOrigins = config.ALLOWED_ORIGINS.split(",").map((v) => v.trim());
     await app.register(cors, { origin: allowedOrigins });
     await healthRoutes(app);
+    await backofficeRoutes(app, config);
     return { app, config };
 }
 async function main() {
