@@ -20,3 +20,13 @@ Backend for Frontend para el panel de backoffice de AxiomNode.
 2. `cp .env.example .env`
 3. `npm install`
 4. `npm run dev`
+
+## Endpoints
+
+- `GET /health`
+- `GET /v1/backoffice/users/leaderboard`
+- `GET /v1/backoffice/monitor/stats`
+
+## Dependencias internas
+
+- `USERS_SERVICE_URL`
