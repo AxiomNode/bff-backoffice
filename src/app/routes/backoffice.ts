@@ -49,6 +49,25 @@ const LogsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(2000).default(200),
 });
 
+const DataMutationSchema = z.object({
+  dataset: z.literal("history"),
+  categoryId: z.string().min(1),
+  language: z.string().min(2).max(5),
+  difficultyPercentage: z.coerce.number().int().min(0).max(100),
+  content: z.record(z.unknown()).refine((value) => Object.keys(value).length > 0, {
+    message: "content must include at least one field",
+  }),
+  status: z.enum(["manual", "validated"]).default("manual"),
+});
+
+const DataDeleteQuerySchema = z.object({
+  dataset: z.literal("history"),
+});
+
+const EntryIdParamsSchema = z.object({
+  entryId: z.string().min(1),
+});
+
 type Row = Record<string, unknown>;
 
 const SERVICE_CATALOG: Array<{
@@ -226,6 +245,43 @@ async function forwardRequest(
   reply.code(result.status);
   reply.header("content-type", result.contentType);
   reply.send(result.payload);
+}
+
+async function forwardDeleteRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  targetUrl: string,
+): Promise<void> {
+  const normalizedHeaders = normalizeAuthHeaders(request);
+  const outgoingHeaders = new Headers();
+  for (const [key, value] of Object.entries(normalizedHeaders)) {
+    if (typeof value === "string" && value.length > 0) {
+      outgoingHeaders.set(key, value);
+    }
+  }
+
+  const response = await fetch(targetUrl, {
+    method: "DELETE",
+    headers: outgoingHeaders,
+  });
+
+  const text = await response.text();
+  reply.code(response.status);
+  reply.header("content-type", response.headers.get("content-type") ?? "application/json");
+  if (!text) {
+    reply.send({});
+    return;
+  }
+
+  try {
+    reply.send(JSON.parse(text));
+  } catch {
+    reply.send(text);
+  }
+}
+
+function isEditableGameService(service: ServiceKey): service is "microservice-quiz" | "microservice-wordpass" {
+  return service === "microservice-quiz" || service === "microservice-wordpass";
 }
 
 async function readDatasetRows(
@@ -447,5 +503,84 @@ export async function backofficeRoutes(
       pageSize: paged.pageSize,
       rows: paged.rows,
     });
+  });
+
+  app.get("/v1/backoffice/services/:service/catalogs", async (request, reply) => {
+    const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid service" });
+    }
+
+    const service = parsedService.data;
+    if (!isEditableGameService(service)) {
+      return reply.status(400).send({
+        message: `Service '${service}' no soporta catalogos de juegos`,
+      });
+    }
+
+    const payload = await fetchJsonFromService(service, config, "/catalogs", request);
+    return reply.send({
+      service,
+      catalogs: payload,
+    });
+  });
+
+  app.post("/v1/backoffice/services/:service/data", async (request, reply) => {
+    const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid service" });
+    }
+
+    const parsedPayload = DataMutationSchema.safeParse(request.body ?? {});
+    if (!parsedPayload.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsedPayload.error.flatten(),
+      });
+    }
+
+    const service = parsedService.data;
+    if (!isEditableGameService(service)) {
+      return reply.status(400).send({
+        message: `Service '${service}' no soporta insercion manual de datos`,
+      });
+    }
+
+    const url = buildUrl(serviceBaseUrl(config, service), "/games/history/manual", {});
+    await forwardRequest(request, reply, url, "POST", parsedPayload.data);
+  });
+
+  app.delete("/v1/backoffice/services/:service/data/:entryId", async (request, reply) => {
+    const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid service" });
+    }
+
+    const parsedParams = EntryIdParamsSchema.safeParse(request.params ?? {});
+    if (!parsedParams.success) {
+      return reply.status(400).send({
+        message: "Invalid path parameters",
+        errors: parsedParams.error.flatten(),
+      });
+    }
+
+    const parsedQuery = DataDeleteQuerySchema.safeParse(request.query ?? {});
+    if (!parsedQuery.success) {
+      return reply.status(400).send({
+        message: "Invalid query parameters",
+        errors: parsedQuery.error.flatten(),
+      });
+    }
+
+    const service = parsedService.data;
+    if (!isEditableGameService(service)) {
+      return reply.status(400).send({
+        message: `Service '${service}' no soporta borrado manual de datos`,
+      });
+    }
+
+    const path = `/games/history/${encodeURIComponent(parsedParams.data.entryId)}`;
+    const url = buildUrl(serviceBaseUrl(config, service), path, {});
+    await forwardDeleteRequest(request, reply, url);
   });
 }
