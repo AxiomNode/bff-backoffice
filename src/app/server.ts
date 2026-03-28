@@ -2,6 +2,7 @@ import "dotenv/config";
 
 import cors from "@fastify/cors";
 import Fastify from "fastify";
+import { isUpstreamTimeoutError } from "@axiomnode/shared-sdk-client/proxy";
 
 import { loadConfig } from "./config.js";
 import { backofficeRoutes } from "./routes/backoffice.js";
@@ -47,6 +48,18 @@ async function buildServer() {
   await healthRoutes(app);
   await monitoringRoutes(app, metrics);
   await backofficeRoutes(app, config, metrics);
+
+  app.setErrorHandler((error, _request, reply) => {
+    if (isUpstreamTimeoutError(error)) {
+      reply.status(504).send({
+        message: "Upstream request timed out",
+        error: error instanceof Error ? error.message : "Timeout",
+      });
+      return;
+    }
+
+    reply.send(error);
+  });
 
   return { app, config, metrics };
 }

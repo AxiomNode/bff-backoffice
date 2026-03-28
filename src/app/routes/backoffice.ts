@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { LeaderboardQuerySchema } from "@axiomnode/shared-sdk-client/contracts";
-import { buildUrl, forwardHttp } from "@axiomnode/shared-sdk-client/proxy";
+import { UpstreamTimeoutError, buildUrl, forwardHttp } from "@axiomnode/shared-sdk-client/proxy";
 import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
@@ -190,6 +190,18 @@ function serviceBaseUrl(config: AppConfig, service: ServiceKey): string {
   }
 }
 
+function resolveServiceApiKey(config: AppConfig, service: ServiceKey): string | undefined {
+  if (service === "ai-engine-stats") {
+    return config.AI_ENGINE_BRIDGE_API_KEY || config.AI_ENGINE_API_KEY;
+  }
+
+  if (service === "ai-engine-api") {
+    return config.AI_ENGINE_API_KEY || config.AI_ENGINE_BRIDGE_API_KEY;
+  }
+
+  return undefined;
+}
+
 async function fetchJsonFromService(
   service: ServiceKey,
   config: AppConfig,
@@ -205,10 +217,29 @@ async function fetchJsonFromService(
   if (headers["x-firebase-id-token"]) {
     outgoingHeaders["x-firebase-id-token"] = headers["x-firebase-id-token"];
   }
+  const serviceApiKey = resolveServiceApiKey(config, service);
+  if (serviceApiKey) {
+    outgoingHeaders["x-api-key"] = serviceApiKey;
+  }
 
-  const response = await fetch(target, {
-    headers: outgoingHeaders,
-  });
+  const timeoutMs = config.UPSTREAM_TIMEOUT_MS ?? 15000;
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(target, {
+      headers: outgoingHeaders,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new UpstreamTimeoutError(`Upstream request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 
   const text = await response.text();
   if (!response.ok) {
@@ -231,6 +262,7 @@ async function forwardRequest(
   reply: FastifyReply,
   targetUrl: string,
   method: "GET" | "POST" | "PATCH",
+  timeoutMs: number,
   body?: unknown,
 ): Promise<void> {
   const normalizedHeaders = normalizeAuthHeaders(request);
@@ -240,6 +272,7 @@ async function forwardRequest(
     method,
     requestHeaders: normalizedHeaders,
     body,
+    timeoutMs,
   });
 
   reply.code(result.status);
@@ -251,6 +284,7 @@ async function forwardDeleteRequest(
   request: FastifyRequest,
   reply: FastifyReply,
   targetUrl: string,
+  timeoutMs: number,
 ): Promise<void> {
   const normalizedHeaders = normalizeAuthHeaders(request);
   const outgoingHeaders = new Headers();
@@ -260,10 +294,24 @@ async function forwardDeleteRequest(
     }
   }
 
-  const response = await fetch(targetUrl, {
-    method: "DELETE",
-    headers: outgoingHeaders,
-  });
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(targetUrl, {
+      method: "DELETE",
+      headers: outgoingHeaders,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new UpstreamTimeoutError(`Upstream request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 
   const text = await response.text();
   reply.code(response.status);
@@ -343,6 +391,8 @@ export async function backofficeRoutes(
   config: AppConfig,
   metrics?: ServiceMetrics,
 ): Promise<void> {
+  const upstreamTimeoutMs = config.UPSTREAM_TIMEOUT_MS ?? 15000;
+
   const runtimeMetrics = metrics ?? {
     snapshot: () => ({ service: "bff-backoffice", note: "metrics disabled" }),
     recentLogs: (_limit: number) => [],
@@ -357,33 +407,33 @@ export async function backofficeRoutes(
 
   app.post("/v1/backoffice/auth/session", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/firebase/session", {});
-    await forwardRequest(request, reply, url, "POST", request.body);
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, request.body);
   });
 
   app.get("/v1/backoffice/auth/me", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/me/profile", {});
-    await forwardRequest(request, reply, url, "GET");
+    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
   });
 
   app.get("/v1/backoffice/users/leaderboard", async (request, reply) => {
     const query = LeaderboardQuerySchema.parse(request.query);
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/leaderboard", query);
-    await forwardRequest(request, reply, url, "GET");
+    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
   });
 
   app.get("/v1/backoffice/monitor/stats", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/monitor/stats", request.query as Record<string, unknown>);
-    await forwardRequest(request, reply, url, "GET");
+    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
   });
 
   app.post("/v1/backoffice/users/events/manual", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/me/games/events", {});
-    await forwardRequest(request, reply, url, "POST", request.body);
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, request.body);
   });
 
   app.get("/v1/backoffice/admin/users/roles", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/admin/roles", {});
-    await forwardRequest(request, reply, url, "GET");
+    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
   });
 
   app.patch("/v1/backoffice/admin/users/roles/:firebaseUid", async (request, reply) => {
@@ -393,7 +443,7 @@ export async function backofficeRoutes(
       `/users/admin/roles/${encodeURIComponent(params.firebaseUid)}`,
       {},
     );
-    await forwardRequest(request, reply, url, "PATCH", request.body);
+    await forwardRequest(request, reply, url, "PATCH", upstreamTimeoutMs, request.body);
   });
 
   app.get("/v1/backoffice/services/:service/metrics", async (request, reply) => {
@@ -547,7 +597,7 @@ export async function backofficeRoutes(
     }
 
     const url = buildUrl(serviceBaseUrl(config, service), "/games/history/manual", {});
-    await forwardRequest(request, reply, url, "POST", parsedPayload.data);
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, parsedPayload.data);
   });
 
   app.delete("/v1/backoffice/services/:service/data/:entryId", async (request, reply) => {
@@ -581,6 +631,6 @@ export async function backofficeRoutes(
 
     const path = `/games/history/${encodeURIComponent(parsedParams.data.entryId)}`;
     const url = buildUrl(serviceBaseUrl(config, service), path, {});
-    await forwardDeleteRequest(request, reply, url);
+    await forwardDeleteRequest(request, reply, url, upstreamTimeoutMs);
   });
 }

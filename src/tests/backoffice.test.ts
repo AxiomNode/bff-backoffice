@@ -179,4 +179,44 @@ describe("backoffice routes", () => {
     vi.unstubAllGlobals();
     await app.close();
   });
+
+  it("includes X-API-Key when requesting ai-engine-stats metrics", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, {
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
+      AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/ai-engine-stats/metrics",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://ai-engine-stats:7000/stats",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-api-key": "bridge-key-123",
+        }),
+      }),
+    );
+
+    vi.unstubAllGlobals();
+    await app.close();
+  });
 });
