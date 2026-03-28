@@ -8,6 +8,10 @@ Backend for Frontend para el panel de backoffice de AxiomNode.
 - Consolidar informacion de microservicios para paneles operativos.
 - Desacoplar UX de backoffice de contratos internos.
 
+## Responsabilidad principal
+
+- Agregacion operacional para panel administrativo y proxy seguro hacia servicios internos.
+
 ## Estructura
 
 - `src/`: servicio Fastify + TypeScript.
