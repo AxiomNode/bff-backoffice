@@ -214,6 +214,9 @@ async function fetchJsonFromService(
   if (headers.authorization) {
     outgoingHeaders.authorization = headers.authorization;
   }
+  if (headers["x-correlation-id"]) {
+    outgoingHeaders["x-correlation-id"] = headers["x-correlation-id"];
+  }
   if (headers["x-firebase-id-token"]) {
     outgoingHeaders["x-firebase-id-token"] = headers["x-firebase-id-token"];
   }
