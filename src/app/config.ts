@@ -11,6 +11,9 @@ const envSchema = z.object({
   API_GATEWAY_URL: z.string().url().default("http://localhost:7005"),
   AI_ENGINE_STATS_URL: z.string().url().default("http://localhost:7000"),
   AI_ENGINE_API_URL: z.string().url().default("http://localhost:7001"),
+  UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
+  AI_ENGINE_BRIDGE_API_KEY: z.string().optional(),
+  AI_ENGINE_API_KEY: z.string().optional(),
   METRICS_LOG_BUFFER_SIZE: z.coerce.number().int().min(50).max(5000).default(1000),
 });
 
@@ -24,6 +27,9 @@ export type AppConfig = Omit<
   | "API_GATEWAY_URL"
   | "AI_ENGINE_STATS_URL"
   | "AI_ENGINE_API_URL"
+  | "UPSTREAM_TIMEOUT_MS"
+  | "AI_ENGINE_BRIDGE_API_KEY"
+  | "AI_ENGINE_API_KEY"
   | "METRICS_LOG_BUFFER_SIZE"
 > & {
   QUIZZ_SERVICE_URL?: string;
@@ -32,6 +38,9 @@ export type AppConfig = Omit<
   API_GATEWAY_URL?: string;
   AI_ENGINE_STATS_URL?: string;
   AI_ENGINE_API_URL?: string;
+  UPSTREAM_TIMEOUT_MS?: number;
+  AI_ENGINE_BRIDGE_API_KEY?: string;
+  AI_ENGINE_API_KEY?: string;
   METRICS_LOG_BUFFER_SIZE?: number;
 };
 
