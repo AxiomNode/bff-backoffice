@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+/** @module config — Environment-based configuration loader for the BFF-Backoffice service. */
+
 const envSchema = z.object({
   SERVICE_NAME: z.string().min(1),
   SERVICE_PORT: z.coerce.number().int().positive(),
@@ -19,6 +21,7 @@ const envSchema = z.object({
 
 type ParsedConfig = z.infer<typeof envSchema>;
 
+/** Application configuration type with optional override fields. */
 export type AppConfig = Omit<
   ParsedConfig,
   | "QUIZZ_SERVICE_URL"
@@ -44,6 +47,7 @@ export type AppConfig = Omit<
   METRICS_LOG_BUFFER_SIZE?: number;
 };
 
+/** Parses and validates environment variables into a typed config object. */
 export function loadConfig(): AppConfig {
   return envSchema.parse(process.env);
 }

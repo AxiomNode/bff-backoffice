@@ -3,13 +3,17 @@ import "dotenv/config";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
-import { isUpstreamTimeoutError } from "@axiomnode/shared-sdk-client/proxy";
+import { isUpstreamTimeoutError, configureHttpAgent } from "@axiomnode/shared-sdk-client/proxy";
 
 import { loadConfig } from "./config.js";
 import { backofficeRoutes } from "./routes/backoffice.js";
 import { healthRoutes } from "./routes/health.js";
 import { monitoringRoutes } from "./routes/monitoring.js";
 import { ServiceMetrics } from "./services/serviceMetrics.js";
+
+configureHttpAgent();
+
+/** @module server — Fastify-based BFF-Backoffice server with CORS, metrics, and backoffice routes. */
 
 async function buildServer() {
   const config = loadConfig();
@@ -38,6 +42,11 @@ async function buildServer() {
   });
 
   app.addHook("onResponse", async (request, reply) => {
+    if (request.url === "/health") {
+      metrics.decrementInflight();
+      return;
+    }
+
     const requestAny = request as typeof request & {
       _requestBytes?: number;
       _startedAt?: number;
@@ -46,7 +55,7 @@ async function buildServer() {
 
     const responseContentLength = Number(reply.getHeader("content-length") ?? 0);
     const responseBytes = Number.isFinite(responseContentLength) ? responseContentLength : 0;
-    const route = (request.routeOptions.url ?? request.url.split("?")[0]) as string;
+    const route = (request.routeOptions.url ?? "UNMATCHED") as string;
     const correlationId = requestAny._correlationId ?? randomUUID();
     const durationMs = Math.max(0, Date.now() - (requestAny._startedAt ?? Date.now()));
 

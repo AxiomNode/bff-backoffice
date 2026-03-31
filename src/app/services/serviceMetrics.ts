@@ -1,5 +1,7 @@
 import type { AppConfig } from "../config.js";
 
+/** @module serviceMetrics — In-memory metrics collection with Prometheus export for the BFF-Backoffice service. */
+
 type LogLevel = "info" | "warn" | "error";
 
 type LogEvent = {
@@ -9,6 +11,7 @@ type LogEvent = {
   context?: Record<string, unknown>;
 };
 
+/** Collects request counts, latency histograms, byte totals, and structured logs. */
 export class ServiceMetrics {
   private readonly startedAt = Date.now();
   private readonly routeCounters = new Map<string, number>();
