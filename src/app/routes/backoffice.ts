@@ -6,6 +6,8 @@ import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import { ServiceMetrics } from "../services/serviceMetrics.js";
 
+/** @module backoffice — Backoffice routes for auth, users, service catalog, data CRUD, and AI diagnostics. */
+
 type ServiceKey =
   | "api-gateway"
   | "bff-backoffice"
@@ -386,6 +388,7 @@ async function readDatasetRows(
   throw new Error(`Dataset '${dataset}' not supported for ${service}`);
 }
 
+/** Registers all backoffice API routes (auth, users, services, data, generation, AI diagnostics). */
 export async function backofficeRoutes(
   app: FastifyInstance,
   config: AppConfig,
