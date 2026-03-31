@@ -1,24 +1,24 @@
 # bff-backoffice
 
-Backend for Frontend para el panel de backoffice de AxiomNode.
+Backend for Frontend for the AxiomNode backoffice panel.
 
-## Objetivo
+## Purpose
 
-- Exponer APIs orientadas a flujos de administracion.
-- Consolidar informacion de microservicios para paneles operativos.
-- Desacoplar UX de backoffice de contratos internos.
+- Expose APIs oriented to administration workflows.
+- Consolidate microservice information for operational dashboards.
+- Decouple backoffice UX from internal contracts.
 
-## Responsabilidad principal
+## Main responsibility
 
-- Agregacion operacional para panel administrativo y proxy seguro hacia servicios internos.
+- Operational aggregation for admin panel and secure proxy to internal services.
 
-## Estructura
+## Structure
 
-- `src/`: servicio Fastify + TypeScript.
-- `docs/`: arquitectura, guias y operacion.
-- `.github/workflows/ci.yml`: pipeline base.
+- `src/`: Fastify + TypeScript service.
+- `docs/`: architecture, guides, and operations.
+- `.github/workflows/ci.yml`: base pipeline.
 
-## Inicio rapido
+## Quick start
 
 1. `cd src`
 2. `cp .env.example .env`
@@ -31,6 +31,6 @@ Backend for Frontend para el panel de backoffice de AxiomNode.
 - `GET /v1/backoffice/users/leaderboard`
 - `GET /v1/backoffice/monitor/stats`
 
-## Dependencias internas
+## Internal dependencies
 
 - `USERS_SERVICE_URL`
