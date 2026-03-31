@@ -41,7 +41,9 @@ const DataQuerySchema = z.object({
   sortDirection: z.enum(["asc", "desc"]).default("asc"),
   filter: z.string().default(""),
   metric: z.enum(["won", "score", "played"]).default("won"),
-  language: z.string().default("es"),
+  language: z.string().min(2).max(5).optional(),
+  categoryId: z.string().min(1).optional(),
+  difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
   limit: z.coerce.number().int().min(1).max(1000).default(500),
 });
 
@@ -66,6 +68,29 @@ const DataDeleteQuerySchema = z.object({
 
 const EntryIdParamsSchema = z.object({
   entryId: z.string().min(1),
+});
+
+const GenerationProcessStartSchema = z.object({
+  categoryId: z.string().min(1),
+  language: z.string().min(2).max(5),
+  difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
+  numQuestions: z.coerce.number().int().min(1).max(50).optional(),
+  letters: z.string().optional(),
+  count: z.coerce.number().int().min(1).max(100).default(10),
+});
+
+const GenerationTaskParamsSchema = z.object({
+  taskId: z.string().uuid(),
+});
+
+const GenerationTaskQuerySchema = z.object({
+  includeItems: z.coerce.boolean().default(false),
+});
+
+const GenerationProcessesQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  status: z.enum(["running", "completed", "failed"]).optional(),
+  requestedBy: z.enum(["api", "backoffice"]).optional(),
 });
 
 type Row = Record<string, unknown>;
@@ -264,7 +289,7 @@ async function forwardRequest(
   request: FastifyRequest,
   reply: FastifyReply,
   targetUrl: string,
-  method: "GET" | "POST" | "PATCH",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   timeoutMs: number,
   body?: unknown,
 ): Promise<void> {
@@ -281,54 +306,6 @@ async function forwardRequest(
   reply.code(result.status);
   reply.header("content-type", result.contentType);
   reply.send(result.payload);
-}
-
-async function forwardDeleteRequest(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  targetUrl: string,
-  timeoutMs: number,
-): Promise<void> {
-  const normalizedHeaders = normalizeAuthHeaders(request);
-  const outgoingHeaders = new Headers();
-  for (const [key, value] of Object.entries(normalizedHeaders)) {
-    if (typeof value === "string" && value.length > 0) {
-      outgoingHeaders.set(key, value);
-    }
-  }
-
-  const controller = new AbortController();
-  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-
-  let response: Response;
-  try {
-    response = await fetch(targetUrl, {
-      method: "DELETE",
-      headers: outgoingHeaders,
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new UpstreamTimeoutError(`Upstream request timed out after ${timeoutMs}ms`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutHandle);
-  }
-
-  const text = await response.text();
-  reply.code(response.status);
-  reply.header("content-type", response.headers.get("content-type") ?? "application/json");
-  if (!text) {
-    reply.send({});
-    return;
-  }
-
-  try {
-    reply.send(JSON.parse(text));
-  } catch {
-    reply.send(text);
-  }
 }
 
 function isEditableGameService(service: ServiceKey): service is "microservice-quiz" | "microservice-wordpass" {
@@ -363,7 +340,17 @@ async function readDatasetRows(
   }
 
   if (service === "microservice-quiz" && dataset === "history") {
-    const path = `/games/history?limit=${query.limit}`;
+    const params = new URLSearchParams({ limit: String(query.limit) });
+    if (query.categoryId) {
+      params.set("categoryId", query.categoryId);
+    }
+    if (query.language) {
+      params.set("language", query.language);
+    }
+    if (typeof query.difficultyPercentage === "number") {
+      params.set("difficultyPercentage", String(query.difficultyPercentage));
+    }
+    const path = `/games/history?${params.toString()}`;
     const payload = (await fetchJsonFromService(service, config, path, request)) as { items?: Array<Record<string, unknown>> };
     return payload.items ?? [];
   }
@@ -375,7 +362,17 @@ async function readDatasetRows(
   }
 
   if (service === "microservice-wordpass" && dataset === "history") {
-    const path = `/games/history?limit=${query.limit}`;
+    const params = new URLSearchParams({ limit: String(query.limit) });
+    if (query.categoryId) {
+      params.set("categoryId", query.categoryId);
+    }
+    if (query.language) {
+      params.set("language", query.language);
+    }
+    if (typeof query.difficultyPercentage === "number") {
+      params.set("difficultyPercentage", String(query.difficultyPercentage));
+    }
+    const path = `/games/history?${params.toString()}`;
     const payload = (await fetchJsonFromService(service, config, path, request)) as { items?: Array<Record<string, unknown>> };
     return payload.items ?? [];
   }
@@ -386,7 +383,7 @@ async function readDatasetRows(
     return payload.tasks ?? [];
   }
 
-  throw new Error(`Dataset '${dataset}' no soportado para ${service}`);
+  throw new Error(`Dataset '${dataset}' not supported for ${service}`);
 }
 
 export async function backofficeRoutes(
@@ -539,7 +536,7 @@ export async function backofficeRoutes(
 
     if (!["microservice-users", "microservice-quiz", "microservice-wordpass"].includes(service)) {
       return reply.status(400).send({
-        message: `Service '${service}' no soporta consultas de datos tabulares`,
+        message: `Service '${service}' does not support tabular data queries`,
       });
     }
 
@@ -567,7 +564,7 @@ export async function backofficeRoutes(
     const service = parsedService.data;
     if (!isEditableGameService(service)) {
       return reply.status(400).send({
-        message: `Service '${service}' no soporta catalogos de juegos`,
+        message: `Service '${service}' does not support game catalogs`,
       });
     }
 
@@ -595,12 +592,137 @@ export async function backofficeRoutes(
     const service = parsedService.data;
     if (!isEditableGameService(service)) {
       return reply.status(400).send({
-        message: `Service '${service}' no soporta insercion manual de datos`,
+        message: `Service '${service}' does not support manual data insertion`,
       });
     }
 
     const url = buildUrl(serviceBaseUrl(config, service), "/games/history/manual", {});
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, parsedPayload.data);
+  });
+
+  app.post("/v1/backoffice/services/:service/generation/process", async (request, reply) => {
+    const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid service" });
+    }
+
+    const parsedPayload = GenerationProcessStartSchema.safeParse(request.body ?? {});
+    if (!parsedPayload.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsedPayload.error.flatten(),
+      });
+    }
+
+    const service = parsedService.data;
+    if (!isEditableGameService(service)) {
+      return reply.status(400).send({
+        message: `Service '${service}' does not support game generation`,
+      });
+    }
+
+    const url = buildUrl(serviceBaseUrl(config, service), "/games/generate/process", {});
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, {
+      ...parsedPayload.data,
+      requestedBy: "backoffice",
+    });
+  });
+
+  app.post("/v1/backoffice/services/:service/generation/wait", async (request, reply) => {
+    const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid service" });
+    }
+
+    const parsedPayload = GenerationProcessStartSchema.safeParse(request.body ?? {});
+    if (!parsedPayload.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsedPayload.error.flatten(),
+      });
+    }
+
+    const service = parsedService.data;
+    if (!isEditableGameService(service)) {
+      return reply.status(400).send({
+        message: `Service '${service}' does not support game generation`,
+      });
+    }
+
+    const url = buildUrl(serviceBaseUrl(config, service), "/games/generate/process/wait", {});
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, {
+      ...parsedPayload.data,
+      requestedBy: "backoffice",
+    });
+  });
+
+  app.get("/v1/backoffice/services/:service/generation/processes", async (request, reply) => {
+    const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid service" });
+    }
+
+    const parsedQuery = GenerationProcessesQuerySchema.safeParse(request.query ?? {});
+    if (!parsedQuery.success) {
+      return reply.status(400).send({
+        message: "Invalid query parameters",
+        errors: parsedQuery.error.flatten(),
+      });
+    }
+
+    const service = parsedService.data;
+    if (!isEditableGameService(service)) {
+      return reply.status(400).send({
+        message: `Service '${service}' does not support game generation`,
+      });
+    }
+
+    const query = new URLSearchParams();
+    query.set("limit", String(parsedQuery.data.limit));
+    if (parsedQuery.data.status) {
+      query.set("status", parsedQuery.data.status);
+    }
+    if (parsedQuery.data.requestedBy) {
+      query.set("requestedBy", parsedQuery.data.requestedBy);
+    }
+
+    const path = `/games/generate/processes?${query.toString()}`;
+    const payload = await fetchJsonFromService(service, config, path, request);
+    return reply.send(payload);
+  });
+
+  app.get("/v1/backoffice/services/:service/generation/process/:taskId", async (request, reply) => {
+    const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid service" });
+    }
+
+    const parsedParams = GenerationTaskParamsSchema.safeParse(request.params ?? {});
+    if (!parsedParams.success) {
+      return reply.status(400).send({
+        message: "Invalid path parameters",
+        errors: parsedParams.error.flatten(),
+      });
+    }
+
+    const parsedQuery = GenerationTaskQuerySchema.safeParse(request.query ?? {});
+    if (!parsedQuery.success) {
+      return reply.status(400).send({
+        message: "Invalid query parameters",
+        errors: parsedQuery.error.flatten(),
+      });
+    }
+
+    const service = parsedService.data;
+    if (!isEditableGameService(service)) {
+      return reply.status(400).send({
+        message: `Service '${service}' does not support game generation`,
+      });
+    }
+
+    const path = `/games/generate/process/${encodeURIComponent(parsedParams.data.taskId)}?includeItems=${parsedQuery.data.includeItems}`;
+    const payload = await fetchJsonFromService(service, config, path, request);
+    return reply.send(payload);
   });
 
   app.delete("/v1/backoffice/services/:service/data/:entryId", async (request, reply) => {
@@ -628,12 +750,46 @@ export async function backofficeRoutes(
     const service = parsedService.data;
     if (!isEditableGameService(service)) {
       return reply.status(400).send({
-        message: `Service '${service}' no soporta borrado manual de datos`,
+        message: `Service '${service}' does not support manual data deletion`,
       });
     }
 
     const path = `/games/history/${encodeURIComponent(parsedParams.data.entryId)}`;
     const url = buildUrl(serviceBaseUrl(config, service), path, {});
-    await forwardDeleteRequest(request, reply, url, upstreamTimeoutMs);
+    await forwardRequest(request, reply, url, "DELETE", upstreamTimeoutMs);
+  });
+
+  // ------------------------------------------------------------------
+  // AI Engine Diagnostics — proxy to ai-engine-api /diagnostics/*
+  // ------------------------------------------------------------------
+
+  app.get("/v1/backoffice/ai-diagnostics/rag/stats", async (request, reply) => {
+    try {
+      const payload = await fetchJsonFromService("ai-engine-api", config, "/diagnostics/rag/stats", request);
+      return reply.send(payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return reply.status(502).send({ message: `ai-engine-api unreachable: ${message}` });
+    }
+  });
+
+  app.post("/v1/backoffice/ai-diagnostics/tests/run", async (request, reply) => {
+    try {
+      const url = buildUrl(serviceBaseUrl(config, "ai-engine-api"), "/diagnostics/tests/run", {});
+      await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return reply.status(502).send({ message: `ai-engine-api unreachable: ${message}` });
+    }
+  });
+
+  app.get("/v1/backoffice/ai-diagnostics/tests/status", async (request, reply) => {
+    try {
+      const payload = await fetchJsonFromService("ai-engine-api", config, "/diagnostics/tests/status", request);
+      return reply.send(payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return reply.status(502).send({ message: `ai-engine-api unreachable: ${message}` });
+    }
   });
 }
