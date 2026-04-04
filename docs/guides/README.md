@@ -1,3 +1,3 @@
 # Guides
 
-Guia de diseño de endpoints para administracion y reporting.
+Guide for admin/reporting endpoint design and evolution.
