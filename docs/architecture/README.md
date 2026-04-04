@@ -1,5 +1,5 @@
 # Architecture
 
-- API orientada a operaciones de negocio internas.
-- Agregacion de datos para dashboards y paneles.
-- Integracion con api-gateway y microservicios internos.
+- API focused on internal business operations.
+- Data aggregation for operational dashboards and admin panels.
+- Integration with `api-gateway` and internal microservices.
