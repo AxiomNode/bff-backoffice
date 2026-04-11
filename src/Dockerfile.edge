@@ -32,5 +32,7 @@ COPY --from=deps /workspace/shared-sdk-client/typescript /workspace/shared-sdk-c
 COPY --from=build /workspace/bff-backoffice/node_modules ./node_modules
 COPY --from=build /workspace/bff-backoffice/dist ./dist
 COPY --from=build /workspace/bff-backoffice/.env.example ./.env.example
+RUN mkdir -p /workspace && chown -R node:node /app /workspace
+USER node
 EXPOSE 7011
 CMD ["node", "dist/app/server.js"]
