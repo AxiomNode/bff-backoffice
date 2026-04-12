@@ -12,7 +12,7 @@ services:
     ports:
       - "7011:7011"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:7011/health || exit 1"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7011/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s
       timeout: 5s
       start_period: 10s
