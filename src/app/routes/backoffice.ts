@@ -398,7 +398,7 @@ export async function backofficeRoutes(
 
   const runtimeMetrics = metrics ?? {
     snapshot: () => ({ service: "bff-backoffice", note: "metrics disabled" }),
-    recentLogs: (_limit: number) => [],
+    recentLogs: () => [],
   };
 
   app.get("/v1/backoffice/services", async (_request, reply) => {
