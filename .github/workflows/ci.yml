@@ -14,13 +14,27 @@ permissions:
 jobs:
   build-test-lint:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: bff-backoffice
+          token: ${{ secrets.CROSS_REPO_READ_TOKEN || github.token }}
+
+      - name: Validate cross-repo token
+        run: |
+          if [[ -z "${{ secrets.CROSS_REPO_READ_TOKEN }}" ]]; then
+            echo "CROSS_REPO_READ_TOKEN is required to checkout AxiomNode/shared-sdk-client in CI."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: AxiomNode/shared-sdk-client
+          path: shared-sdk-client
+          token: ${{ secrets.CROSS_REPO_READ_TOKEN }}
+
       - name: Enforce tracked artifact policy
-        working-directory: .
+        working-directory: bff-backoffice
         run: |
           set -euo pipefail
           forbidden=$(git ls-files | grep -E '(^|/)src/(node_modules|dist)/' || true)
@@ -33,11 +47,15 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: src/package-lock.json
+          cache-dependency-path: bff-backoffice/src/package-lock.json
       - run: npm ci
+        working-directory: bff-backoffice/src
       - run: npm run build
+        working-directory: bff-backoffice/src
       - run: npm test
+        working-directory: bff-backoffice/src
       - run: npm run lint
+        working-directory: bff-backoffice/src
 
   trigger-platform-infra-build:
     name: Trigger Platform Infra Build
