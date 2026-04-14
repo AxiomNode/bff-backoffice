@@ -49,6 +49,32 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("rejects invalid leaderboard query params before proxying", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, {
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/users/leaderboard?limit=9999",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ message: "Invalid query parameters" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+    await app.close();
+  });
+
   it("forwards manual history insertion for quiz service", async () => {
     const app = Fastify();
 

@@ -419,8 +419,15 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/users/leaderboard", async (request, reply) => {
-    const query = LeaderboardQuerySchema.parse(request.query);
-    const url = buildUrl(config.USERS_SERVICE_URL, "/users/leaderboard", query);
+    const query = LeaderboardQuerySchema.safeParse(request.query ?? {});
+    if (!query.success) {
+      return reply.status(400).send({
+        message: "Invalid query parameters",
+        errors: query.error.flatten(),
+      });
+    }
+
+    const url = buildUrl(config.USERS_SERVICE_URL, "/users/leaderboard", query.data);
     await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
   });
 
