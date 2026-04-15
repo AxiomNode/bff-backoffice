@@ -31,7 +31,7 @@ Backend-for-Frontend service for AxiomNode backoffice operations.
 
 - `ci.yml`
 	- Trigger: push (`main`, `develop`), pull request, manual dispatch.
-	- Job `build-test-lint`: install, build, test, and lint.
+	- Job `build-test-lint`: checks out `shared-sdk-client` with `CROSS_REPO_READ_TOKEN`, blocks tracked `src/node_modules` / `src/dist`, then runs install, build, test, lint, and production `npm audit --omit=dev --audit-level=high`.
 	- Job `trigger-platform-infra-build`:
 		- Runs on push to `main`.
 		- Dispatches `platform-infra/.github/workflows/build-push.yaml` with `service=bff-backoffice`.
