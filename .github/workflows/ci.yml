@@ -60,6 +60,8 @@ jobs:
         working-directory: bff-backoffice/src
       - run: npm run lint
         working-directory: bff-backoffice/src
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: bff-backoffice/src
 
   trigger-platform-infra-build:
     name: Trigger Platform Infra Build
