@@ -695,6 +695,10 @@ export async function backofficeRoutes(
   const routingStore = new RoutingStateStore(config);
   await routingStore.load();
 
+  const refreshRoutingState = async (): Promise<void> => {
+    await routingStore.load();
+  };
+
   const runtimeMetrics = metrics ?? {
     snapshot: () => ({ service: "bff-backoffice", note: "metrics disabled" }),
     recentLogs: () => [],
@@ -708,6 +712,7 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/service-targets", async (_request, reply) => {
+    await refreshRoutingState();
     const targets = getServiceRuntimeTargets(config, routingStore);
     return reply.send({
       total: targets.length,
@@ -716,6 +721,7 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/service-targets/:service", async (request, reply) => {
+    await refreshRoutingState();
     const parsed = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
     if (!parsed.success) {
       return reply.status(400).send({ message: "Invalid configurable service" });
@@ -725,6 +731,7 @@ export async function backofficeRoutes(
   });
 
   app.put("/v1/backoffice/service-targets/:service", async (request, reply) => {
+    await refreshRoutingState();
     const parsedService = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
     if (!parsedService.success) {
       return reply.status(400).send({ message: "Invalid configurable service" });
@@ -749,6 +756,7 @@ export async function backofficeRoutes(
   });
 
   app.delete("/v1/backoffice/service-targets/:service", async (request, reply) => {
+    await refreshRoutingState();
     const parsed = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
     if (!parsed.success) {
       return reply.status(400).send({ message: "Invalid configurable service" });
@@ -759,10 +767,12 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/ai-engine/target", async (_request, reply) => {
+    await refreshRoutingState();
     return reply.send(getAiEngineRuntimeTarget(config, routingStore));
   });
 
   app.put("/v1/backoffice/ai-engine/target", async (request, reply) => {
+    await refreshRoutingState();
     const parsed = AiEngineTargetSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       return reply.status(400).send({
@@ -783,6 +793,7 @@ export async function backofficeRoutes(
   });
 
   app.delete("/v1/backoffice/ai-engine/target", async (_request, reply) => {
+    await refreshRoutingState();
     try {
       await syncGatewayAiEngineTarget(config, routingStore, "DELETE");
       await resetAiEngineRuntimeTarget(routingStore);
