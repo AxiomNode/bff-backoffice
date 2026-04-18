@@ -5,12 +5,22 @@ import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
 import { ServiceMetrics } from "../services/serviceMetrics.js";
+import { RoutingStateStore, type PersistedRoutingServiceKey, type PersistedRoutingOverride } from "../services/routingStateStore.js";
 
 /** @module backoffice — Backoffice routes for auth, users, service catalog, data CRUD, and AI diagnostics. */
 
 type ServiceKey =
   | "api-gateway"
   | "bff-backoffice"
+  | "bff-mobile"
+  | "microservice-users"
+  | "microservice-quiz"
+  | "microservice-wordpass"
+  | "ai-engine-stats"
+  | "ai-engine-api";
+
+type ConfigurableServiceTargetKey =
+  | "api-gateway"
   | "bff-mobile"
   | "microservice-users"
   | "microservice-quiz"
@@ -34,6 +44,21 @@ const ServiceKeySchema = z.enum([
   "ai-engine-stats",
   "ai-engine-api",
 ]);
+
+const ConfigurableServiceTargetKeySchema = z.enum([
+  "api-gateway",
+  "bff-mobile",
+  "microservice-users",
+  "microservice-quiz",
+  "microservice-wordpass",
+  "ai-engine-stats",
+  "ai-engine-api",
+]);
+
+const ServiceTargetOverrideSchema = z.object({
+  baseUrl: z.string().trim().url(),
+  label: z.string().trim().max(80).optional(),
+});
 
 const DataQuerySchema = z.object({
   dataset: z.enum(["roles", "leaderboard", "history", "processes"]),
@@ -95,6 +120,24 @@ const GenerationProcessesQuerySchema = z.object({
   requestedBy: z.enum(["api", "backoffice"]).optional(),
 });
 
+const AiEngineTargetSchema = z.object({
+  host: z.string().trim().min(1).max(255),
+  protocol: z.enum(["http", "https"]).default("http"),
+  apiPort: z.coerce.number().int().min(1).max(65535).default(7001),
+  statsPort: z.coerce.number().int().min(1).max(65535).default(7000),
+  label: z.string().trim().max(80).optional(),
+});
+
+const CONFIGURABLE_SERVICE_TARGET_KEYS: ConfigurableServiceTargetKey[] = [
+  "api-gateway",
+  "bff-mobile",
+  "microservice-users",
+  "microservice-quiz",
+  "microservice-wordpass",
+  "ai-engine-stats",
+  "ai-engine-api",
+];
+
 type Row = Record<string, unknown>;
 
 const SERVICE_CATALOG: Array<{
@@ -112,6 +155,266 @@ const SERVICE_CATALOG: Array<{
   { key: "ai-engine-stats", title: "AI Engine Stats", domain: "ai", supportsData: false },
   { key: "ai-engine-api", title: "AI Engine API", domain: "ai", supportsData: false },
 ];
+
+function normalizeAiEngineHost(raw: string): string {
+  const trimmed = raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  const withoutPath = trimmed.split("/")[0] ?? "";
+  const withoutPort = withoutPath.replace(/:\d+$/, "");
+
+  if (!withoutPort || !/^[a-zA-Z0-9.-]+$/.test(withoutPort)) {
+    throw new Error("host must be a valid hostname or IPv4 address");
+  }
+
+  return withoutPort;
+}
+
+function buildAiEngineBaseUrl(protocol: "http" | "https", host: string, port: number): string {
+  return `${protocol}://${host}:${port}`;
+}
+
+function normalizeServiceBaseUrl(raw: string): string {
+  const parsed = new URL(raw.trim());
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("baseUrl must use http or https");
+  }
+
+  if ((parsed.pathname && parsed.pathname !== "/") || parsed.search || parsed.hash) {
+    throw new Error("baseUrl must not include path, query, or hash");
+  }
+
+  return parsed.origin;
+}
+
+function parseIpv4Address(host: string): number | null {
+  const octets = host.split(".");
+  if (octets.length !== 4) {
+    return null;
+  }
+
+  const numbers = octets.map((part) => Number(part));
+  if (numbers.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
+    return null;
+  }
+
+  return ((numbers[0] << 24) >>> 0) + (numbers[1] << 16) + (numbers[2] << 8) + numbers[3];
+}
+
+function isIpv4InCidr(host: string, cidr: string): boolean {
+  const [network, prefixRaw] = cidr.split("/");
+  const ip = parseIpv4Address(host);
+  const networkIp = parseIpv4Address(network ?? "");
+  const prefix = Number(prefixRaw);
+
+  if (ip === null || networkIp === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
+    return false;
+  }
+
+  if (prefix === 0) {
+    return true;
+  }
+
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  return (ip & mask) === (networkIp & mask);
+}
+
+function isAllowedRoutingTargetHost(config: AppConfig, host: string): boolean {
+  const policy = config.ALLOWED_ROUTING_TARGET_HOSTS?.trim();
+  if (!policy) {
+    return true;
+  }
+
+  const normalizedHost = host.trim().toLowerCase();
+  const rules = policy
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+
+  return rules.some((rule) => {
+    if (rule.includes("/")) {
+      return isIpv4InCidr(normalizedHost, rule);
+    }
+
+    if (rule.startsWith("*.")) {
+      return normalizedHost === rule.slice(2) || normalizedHost.endsWith(rule.slice(1));
+    }
+
+    return normalizedHost === rule;
+  });
+}
+
+function assertAllowedRoutingTargetHost(config: AppConfig, host: string): void {
+  if (!isAllowedRoutingTargetHost(config, host)) {
+    throw new Error(`host '${host}' is not allowed by ALLOWED_ROUTING_TARGET_HOSTS`);
+  }
+}
+
+function parseBaseUrl(url: string): {
+  host: string | null;
+  protocol: "http" | "https" | null;
+  port: number | null;
+} {
+  try {
+    const parsed = new URL(url);
+    const protocol = parsed.protocol === "https:" ? "https" : parsed.protocol === "http:" ? "http" : null;
+    const fallbackPort = protocol === "https" ? 443 : protocol === "http" ? 80 : NaN;
+    const parsedPort = parsed.port ? Number(parsed.port) : fallbackPort;
+
+    return {
+      host: parsed.hostname || null,
+      protocol,
+      port: Number.isFinite(parsedPort) ? parsedPort : null,
+    };
+  } catch {
+    return {
+      host: null,
+      protocol: null,
+      port: null,
+    };
+  }
+}
+
+function getAiEngineRuntimeTarget(config: AppConfig, routingStore: RoutingStateStore) {
+  const apiBaseUrl = getServiceRuntimeTarget(config, routingStore, "ai-engine-api").baseUrl;
+  const statsBaseUrl = getServiceRuntimeTarget(config, routingStore, "ai-engine-stats").baseUrl;
+  const apiParsed = parseBaseUrl(apiBaseUrl);
+  const statsParsed = parseBaseUrl(statsBaseUrl);
+  const apiOverride = routingStore.get("ai-engine-api");
+  const statsOverride = routingStore.get("ai-engine-stats");
+  const activeOverride = apiOverride ?? statsOverride;
+
+  return {
+    source: activeOverride ? ("override" as const) : ("env" as const),
+    label: activeOverride?.label ?? null,
+    host: apiParsed.host ?? statsParsed.host,
+    protocol: apiParsed.protocol ?? statsParsed.protocol,
+    apiPort: apiParsed.port,
+    statsPort: statsParsed.port,
+    apiBaseUrl,
+    statsBaseUrl,
+    updatedAt: activeOverride?.updatedAt ?? null,
+  };
+}
+
+function getServiceCatalogTitle(service: ServiceKey): string {
+  return SERVICE_CATALOG.find((entry) => entry.key === service)?.title ?? service;
+}
+
+function getEnvServiceBaseUrl(config: AppConfig, service: ConfigurableServiceTargetKey): string {
+  switch (service) {
+    case "api-gateway":
+      return config.API_GATEWAY_URL ?? "http://localhost:7005";
+    case "bff-mobile":
+      return config.BFF_MOBILE_URL ?? "http://localhost:7010";
+    case "microservice-users":
+      return config.USERS_SERVICE_URL;
+    case "microservice-quiz":
+      return config.QUIZZ_SERVICE_URL ?? "http://localhost:7100";
+    case "microservice-wordpass":
+      return config.WORDPASS_SERVICE_URL ?? "http://localhost:7101";
+    case "ai-engine-stats":
+      return config.AI_ENGINE_STATS_URL ?? "http://localhost:7000";
+    case "ai-engine-api":
+      return config.AI_ENGINE_API_URL ?? "http://localhost:7001";
+  }
+}
+
+function getServiceRuntimeTarget(config: AppConfig, routingStore: RoutingStateStore, service: ConfigurableServiceTargetKey) {
+  const override = routingStore.get(service);
+  if (override) {
+    return {
+      service,
+      title: getServiceCatalogTitle(service),
+      source: "override" as const,
+      baseUrl: override.baseUrl,
+      label: override.label ?? null,
+      updatedAt: override.updatedAt,
+    };
+  }
+
+  return {
+    service,
+    title: getServiceCatalogTitle(service),
+    source: "env" as const,
+    baseUrl: getEnvServiceBaseUrl(config, service),
+    label: null,
+    updatedAt: null,
+  };
+}
+
+function getServiceRuntimeTargets(config: AppConfig, routingStore: RoutingStateStore) {
+  return CONFIGURABLE_SERVICE_TARGET_KEYS.map((service) => getServiceRuntimeTarget(config, routingStore, service));
+}
+
+async function applyServiceRuntimeTarget(
+  config: AppConfig,
+  routingStore: RoutingStateStore,
+  service: ConfigurableServiceTargetKey,
+  input: z.infer<typeof ServiceTargetOverrideSchema>,
+): Promise<void> {
+  const normalizedBaseUrl = normalizeServiceBaseUrl(input.baseUrl);
+  assertAllowedRoutingTargetHost(config, new URL(normalizedBaseUrl).hostname);
+
+  const override: PersistedRoutingOverride = {
+    baseUrl: normalizedBaseUrl,
+    label: input.label?.trim() || undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  await routingStore.set(service as PersistedRoutingServiceKey, override);
+}
+
+async function resetServiceRuntimeTarget(routingStore: RoutingStateStore, service: ConfigurableServiceTargetKey): Promise<void> {
+  await routingStore.delete(service as PersistedRoutingServiceKey);
+}
+
+async function applyAiEngineRuntimeTarget(config: AppConfig, routingStore: RoutingStateStore, input: z.infer<typeof AiEngineTargetSchema>): Promise<void> {
+  const host = normalizeAiEngineHost(input.host);
+  const label = input.label?.trim() || undefined;
+  const updatedAt = new Date().toISOString();
+  await routingStore.set("ai-engine-api", {
+    baseUrl: buildAiEngineBaseUrl(input.protocol, host, input.apiPort),
+    label,
+    updatedAt,
+  });
+  await routingStore.set("ai-engine-stats", {
+    baseUrl: buildAiEngineBaseUrl(input.protocol, host, input.statsPort),
+    label,
+    updatedAt,
+  });
+}
+
+async function resetAiEngineRuntimeTarget(routingStore: RoutingStateStore): Promise<void> {
+  await routingStore.delete("ai-engine-api");
+  await routingStore.delete("ai-engine-stats");
+}
+
+async function syncGatewayAiEngineTarget(
+  config: AppConfig,
+  routingStore: RoutingStateStore,
+  method: "PUT" | "DELETE",
+  body?: Record<string, unknown>,
+): Promise<void> {
+  const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "api-gateway"), "/internal/admin/ai-engine/target", {});
+  const headers: Record<string, string> = {};
+
+  if (config.API_GATEWAY_ADMIN_TOKEN?.trim()) {
+    headers.authorization = `Bearer ${config.API_GATEWAY_ADMIN_TOKEN.trim()}`;
+  }
+
+  if (body) {
+    headers["content-type"] = "application/json";
+  }
+
+  const response = await fetch(targetUrl, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `api-gateway ai-engine target sync failed with HTTP ${response.status}`);
+  }
+}
 
 function normalizeAuthHeaders(request: FastifyRequest): Record<string, string | undefined> {
   const idTokenHeader = request.headers["x-firebase-id-token"];
@@ -196,25 +499,17 @@ function applyRowsQuery(
   };
 }
 
-function serviceBaseUrl(config: AppConfig, service: ServiceKey): string {
+function serviceBaseUrl(config: AppConfig, routingStore: RoutingStateStore, service: ServiceKey): string {
+  if (CONFIGURABLE_SERVICE_TARGET_KEYS.includes(service as ConfigurableServiceTargetKey)) {
+    return getServiceRuntimeTarget(config, routingStore, service as ConfigurableServiceTargetKey).baseUrl;
+  }
+
   switch (service) {
-    case "api-gateway":
-      return config.API_GATEWAY_URL ?? "http://localhost:7005";
     case "bff-backoffice":
       return `http://localhost:${config.SERVICE_PORT}`;
-    case "bff-mobile":
-      return config.BFF_MOBILE_URL ?? "http://localhost:7010";
-    case "microservice-users":
-      return config.USERS_SERVICE_URL;
-    case "microservice-quiz":
-      return config.QUIZZ_SERVICE_URL ?? "http://localhost:7100";
-    case "microservice-wordpass":
-      return config.WORDPASS_SERVICE_URL ?? "http://localhost:7101";
-    case "ai-engine-stats":
-      return config.AI_ENGINE_STATS_URL ?? "http://localhost:7000";
-    case "ai-engine-api":
-      return config.AI_ENGINE_API_URL ?? "http://localhost:7001";
   }
+
+  throw new Error(`Unsupported service '${service}'`);
 }
 
 function resolveServiceApiKey(config: AppConfig, service: ServiceKey): string | undefined {
@@ -232,11 +527,12 @@ function resolveServiceApiKey(config: AppConfig, service: ServiceKey): string | 
 async function fetchJsonFromService(
   service: ServiceKey,
   config: AppConfig,
+  routingStore: RoutingStateStore,
   path: string,
   request: FastifyRequest,
 ): Promise<unknown> {
   const headers = normalizeAuthHeaders(request);
-  const target = buildUrl(serviceBaseUrl(config, service), path, {});
+  const target = buildUrl(serviceBaseUrl(config, routingStore, service), path, {});
   const outgoingHeaders: Record<string, string> = {};
   if (headers.authorization) {
     outgoingHeaders.authorization = headers.authorization;
@@ -319,10 +615,11 @@ async function readDatasetRows(
   dataset: DataQueryDataset,
   query: z.infer<typeof DataQuerySchema>,
   config: AppConfig,
+  routingStore: RoutingStateStore,
   request: FastifyRequest,
 ): Promise<Row[]> {
   if (service === "microservice-users" && dataset === "roles") {
-    const payload = (await fetchJsonFromService(service, config, "/users/admin/roles", request)) as {
+    const payload = (await fetchJsonFromService(service, config, routingStore, "/users/admin/roles", request)) as {
       users?: Array<Record<string, unknown>>;
     };
     return payload.users ?? [];
@@ -330,7 +627,7 @@ async function readDatasetRows(
 
   if (service === "microservice-users" && dataset === "leaderboard") {
     const path = `/users/leaderboard?metric=${encodeURIComponent(query.metric)}&limit=${query.limit}`;
-    const payload = (await fetchJsonFromService(service, config, path, request)) as {
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as {
       rows?: Array<Record<string, unknown>>;
       metric?: string;
     };
@@ -353,13 +650,13 @@ async function readDatasetRows(
       params.set("difficultyPercentage", String(query.difficultyPercentage));
     }
     const path = `/games/history?${params.toString()}`;
-    const payload = (await fetchJsonFromService(service, config, path, request)) as { items?: Array<Record<string, unknown>> };
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as { items?: Array<Record<string, unknown>> };
     return payload.items ?? [];
   }
 
   if (service === "microservice-quiz" && dataset === "processes") {
     const path = `/games/generate/processes?limit=${query.limit}`;
-    const payload = (await fetchJsonFromService(service, config, path, request)) as { tasks?: Array<Record<string, unknown>> };
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as { tasks?: Array<Record<string, unknown>> };
     return payload.tasks ?? [];
   }
 
@@ -375,13 +672,13 @@ async function readDatasetRows(
       params.set("difficultyPercentage", String(query.difficultyPercentage));
     }
     const path = `/games/history?${params.toString()}`;
-    const payload = (await fetchJsonFromService(service, config, path, request)) as { items?: Array<Record<string, unknown>> };
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as { items?: Array<Record<string, unknown>> };
     return payload.items ?? [];
   }
 
   if (service === "microservice-wordpass" && dataset === "processes") {
     const path = `/games/generate/processes?limit=${query.limit}`;
-    const payload = (await fetchJsonFromService(service, config, path, request)) as { tasks?: Array<Record<string, unknown>> };
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as { tasks?: Array<Record<string, unknown>> };
     return payload.tasks ?? [];
   }
 
@@ -395,6 +692,8 @@ export async function backofficeRoutes(
   metrics?: ServiceMetrics,
 ): Promise<void> {
   const upstreamTimeoutMs = config.UPSTREAM_TIMEOUT_MS ?? 15000;
+  const routingStore = new RoutingStateStore(config);
+  await routingStore.load();
 
   const runtimeMetrics = metrics ?? {
     snapshot: () => ({ service: "bff-backoffice", note: "metrics disabled" }),
@@ -406,6 +705,93 @@ export async function backofficeRoutes(
       total: SERVICE_CATALOG.length,
       services: SERVICE_CATALOG,
     });
+  });
+
+  app.get("/v1/backoffice/service-targets", async (_request, reply) => {
+    const targets = getServiceRuntimeTargets(config, routingStore);
+    return reply.send({
+      total: targets.length,
+      targets,
+    });
+  });
+
+  app.get("/v1/backoffice/service-targets/:service", async (request, reply) => {
+    const parsed = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: "Invalid configurable service" });
+    }
+
+    return reply.send(getServiceRuntimeTarget(config, routingStore, parsed.data));
+  });
+
+  app.put("/v1/backoffice/service-targets/:service", async (request, reply) => {
+    const parsedService = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid configurable service" });
+    }
+
+    const parsedPayload = ServiceTargetOverrideSchema.safeParse(request.body ?? {});
+    if (!parsedPayload.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsedPayload.error.flatten(),
+      });
+    }
+
+    try {
+      await applyServiceRuntimeTarget(config, routingStore, parsedService.data, parsedPayload.data);
+      return reply.send(getServiceRuntimeTarget(config, routingStore, parsedService.data));
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Invalid service target",
+      });
+    }
+  });
+
+  app.delete("/v1/backoffice/service-targets/:service", async (request, reply) => {
+    const parsed = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: "Invalid configurable service" });
+    }
+
+    await resetServiceRuntimeTarget(routingStore, parsed.data);
+    return reply.send(getServiceRuntimeTarget(config, routingStore, parsed.data));
+  });
+
+  app.get("/v1/backoffice/ai-engine/target", async (_request, reply) => {
+    return reply.send(getAiEngineRuntimeTarget(config, routingStore));
+  });
+
+  app.put("/v1/backoffice/ai-engine/target", async (request, reply) => {
+    const parsed = AiEngineTargetSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsed.error.flatten(),
+      });
+    }
+
+    try {
+      await syncGatewayAiEngineTarget(config, routingStore, "PUT", parsed.data as Record<string, unknown>);
+      await applyAiEngineRuntimeTarget(config, routingStore, parsed.data);
+      return reply.send(getAiEngineRuntimeTarget(config, routingStore));
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Invalid ai-engine target",
+      });
+    }
+  });
+
+  app.delete("/v1/backoffice/ai-engine/target", async (_request, reply) => {
+    try {
+      await syncGatewayAiEngineTarget(config, routingStore, "DELETE");
+      await resetAiEngineRuntimeTarget(routingStore);
+      return reply.send(getAiEngineRuntimeTarget(config, routingStore));
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Unable to reset ai-engine target",
+      });
+    }
   });
 
   app.post("/v1/backoffice/auth/session", async (request, reply) => {
@@ -469,16 +855,16 @@ export async function backofficeRoutes(
     }
 
     if (service === "ai-engine-stats") {
-      const payload = await fetchJsonFromService(service, config, "/stats", request);
+      const payload = await fetchJsonFromService(service, config, routingStore, "/stats", request);
       return reply.send({ service, metrics: payload });
     }
 
     if (service === "ai-engine-api") {
-      const payload = await fetchJsonFromService(service, config, "/health", request);
+      const payload = await fetchJsonFromService(service, config, routingStore, "/health", request);
       return reply.send({ service, metrics: payload });
     }
 
-    const payload = await fetchJsonFromService(service, config, "/monitor/stats", request);
+    const payload = await fetchJsonFromService(service, config, routingStore, "/monitor/stats", request);
     return reply.send({ service, metrics: payload });
   });
 
@@ -509,7 +895,7 @@ export async function backofficeRoutes(
 
     if (service === "ai-engine-stats") {
       const path = `/stats/history?limit=${limit}`;
-      const payload = await fetchJsonFromService(service, config, path, request);
+      const payload = await fetchJsonFromService(service, config, routingStore, path, request);
       return reply.send({ service, logs: payload });
     }
 
@@ -523,7 +909,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/monitor/logs?limit=${limit}`;
-    const payload = await fetchJsonFromService(service, config, path, request);
+    const payload = await fetchJsonFromService(service, config, routingStore, path, request);
     return reply.send({ service, logs: payload });
   });
 
@@ -550,7 +936,7 @@ export async function backofficeRoutes(
       });
     }
 
-    const rows = await readDatasetRows(service, query.dataset, query, config, request);
+    const rows = await readDatasetRows(service, query.dataset, query, config, routingStore, request);
     const paged = applyRowsQuery(rows, query);
     return reply.send({
       service,
@@ -578,7 +964,7 @@ export async function backofficeRoutes(
       });
     }
 
-    const payload = await fetchJsonFromService(service, config, "/catalogs", request);
+    const payload = await fetchJsonFromService(service, config, routingStore, "/catalogs", request);
     return reply.send({
       service,
       catalogs: payload,
@@ -606,7 +992,7 @@ export async function backofficeRoutes(
       });
     }
 
-    const url = buildUrl(serviceBaseUrl(config, service), "/games/history/manual", {});
+    const url = buildUrl(serviceBaseUrl(config, routingStore, service), "/games/history/manual", {});
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, parsedPayload.data);
   });
 
@@ -631,7 +1017,7 @@ export async function backofficeRoutes(
       });
     }
 
-    const url = buildUrl(serviceBaseUrl(config, service), "/games/generate/process", {});
+    const url = buildUrl(serviceBaseUrl(config, routingStore, service), "/games/generate/process", {});
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, {
       ...parsedPayload.data,
       requestedBy: "backoffice",
@@ -659,7 +1045,7 @@ export async function backofficeRoutes(
       });
     }
 
-    const url = buildUrl(serviceBaseUrl(config, service), "/games/generate/process/wait", {});
+    const url = buildUrl(serviceBaseUrl(config, routingStore, service), "/games/generate/process/wait", {});
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, {
       ...parsedPayload.data,
       requestedBy: "backoffice",
@@ -697,7 +1083,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/generate/processes?${query.toString()}`;
-    const payload = await fetchJsonFromService(service, config, path, request);
+    const payload = await fetchJsonFromService(service, config, routingStore, path, request);
     return reply.send(payload);
   });
 
@@ -731,7 +1117,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/generate/process/${encodeURIComponent(parsedParams.data.taskId)}?includeItems=${parsedQuery.data.includeItems}`;
-    const payload = await fetchJsonFromService(service, config, path, request);
+    const payload = await fetchJsonFromService(service, config, routingStore, path, request);
     return reply.send(payload);
   });
 
@@ -765,7 +1151,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/history/${encodeURIComponent(parsedParams.data.entryId)}`;
-    const url = buildUrl(serviceBaseUrl(config, service), path, {});
+    const url = buildUrl(serviceBaseUrl(config, routingStore, service), path, {});
     await forwardRequest(request, reply, url, "DELETE", upstreamTimeoutMs);
   });
 
@@ -775,7 +1161,7 @@ export async function backofficeRoutes(
 
   app.get("/v1/backoffice/ai-diagnostics/rag/stats", async (request, reply) => {
     try {
-      const payload = await fetchJsonFromService("ai-engine-api", config, "/diagnostics/rag/stats", request);
+      const payload = await fetchJsonFromService("ai-engine-api", config, routingStore, "/diagnostics/rag/stats", request);
       return reply.send(payload);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -785,7 +1171,7 @@ export async function backofficeRoutes(
 
   app.post("/v1/backoffice/ai-diagnostics/tests/run", async (request, reply) => {
     try {
-      const url = buildUrl(serviceBaseUrl(config, "ai-engine-api"), "/diagnostics/tests/run", {});
+      const url = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/diagnostics/tests/run", {});
       await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -795,7 +1181,7 @@ export async function backofficeRoutes(
 
   app.get("/v1/backoffice/ai-diagnostics/tests/status", async (request, reply) => {
     try {
-      const payload = await fetchJsonFromService("ai-engine-api", config, "/diagnostics/tests/status", request);
+      const payload = await fetchJsonFromService("ai-engine-api", config, routingStore, "/diagnostics/tests/status", request);
       return reply.send(payload);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";

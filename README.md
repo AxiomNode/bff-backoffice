@@ -26,6 +26,10 @@ Backend-for-Frontend service for AxiomNode backoffice operations.
 - `GET /health`
 - `GET /v1/backoffice/users/leaderboard`
 - `GET /v1/backoffice/monitor/stats`
+- `GET /v1/backoffice/service-targets`
+- `PUT /v1/backoffice/service-targets/:service`
+- `DELETE /v1/backoffice/service-targets/:service`
+- `GET /v1/backoffice/ai-engine/target`
 
 ## CI/CD workflow behavior
 
@@ -47,3 +51,12 @@ Push to `main` triggers image rebuild in `platform-infra`, then automatic Kubern
 - `QUIZZ_SERVICE_URL`
 - `WORDPASS_SERVICE_URL`
 - `AI_ENGINE_STATS_URL`
+
+## Runtime routing overrides
+
+- The BFF can override upstream base URLs at runtime for `api-gateway`, `bff-mobile`, `microservice-users`, `microservice-quiz`, `microservice-wordpass`, `ai-engine-stats`, and `ai-engine-api`.
+- Overrides are persisted in `BACKOFFICE_ROUTING_STATE_FILE` and survive BFF restarts.
+- Legacy ai-engine target routes remain available and now do two things in one step: update the BFF local diagnostics target and synchronize the live ai-engine target stored by `api-gateway`.
+- `ALLOWED_ROUTING_TARGET_HOSTS` can restrict overrides to explicit hosts, wildcard suffixes like `*.amksandbox.cloud`, and IPv4 CIDR ranges such as `192.168.0.0/16`.
+- The dedicated ai-engine target route is exempt from that allowlist so backoffice admins can move ai-engine to any reachable host without redeploying the cluster.
+- `API_GATEWAY_ADMIN_TOKEN` is optional hardening for the internal gateway sync route; when set, the BFF sends it as a bearer token while propagating ai-engine target changes.

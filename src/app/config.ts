@@ -16,7 +16,10 @@ const envSchema = z.object({
   UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
   AI_ENGINE_BRIDGE_API_KEY: z.string().optional(),
   AI_ENGINE_API_KEY: z.string().optional(),
+  API_GATEWAY_ADMIN_TOKEN: z.string().optional(),
   METRICS_LOG_BUFFER_SIZE: z.coerce.number().int().min(50).max(5000).default(1000),
+  BACKOFFICE_ROUTING_STATE_FILE: z.string().min(1).optional(),
+  ALLOWED_ROUTING_TARGET_HOSTS: z.string().min(1).optional(),
 });
 
 type ParsedConfig = z.infer<typeof envSchema>;
@@ -33,7 +36,10 @@ export type AppConfig = Omit<
   | "UPSTREAM_TIMEOUT_MS"
   | "AI_ENGINE_BRIDGE_API_KEY"
   | "AI_ENGINE_API_KEY"
+  | "API_GATEWAY_ADMIN_TOKEN"
   | "METRICS_LOG_BUFFER_SIZE"
+  | "BACKOFFICE_ROUTING_STATE_FILE"
+  | "ALLOWED_ROUTING_TARGET_HOSTS"
 > & {
   QUIZZ_SERVICE_URL?: string;
   WORDPASS_SERVICE_URL?: string;
@@ -44,7 +50,10 @@ export type AppConfig = Omit<
   UPSTREAM_TIMEOUT_MS?: number;
   AI_ENGINE_BRIDGE_API_KEY?: string;
   AI_ENGINE_API_KEY?: string;
+  API_GATEWAY_ADMIN_TOKEN?: string;
   METRICS_LOG_BUFFER_SIZE?: number;
+  BACKOFFICE_ROUTING_STATE_FILE?: string;
+  ALLOWED_ROUTING_TARGET_HOSTS?: string;
 };
 
 /** Parses and validates environment variables into a typed config object. */
