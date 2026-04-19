@@ -23,13 +23,12 @@ export type PersistedAiEnginePreset = {
   name: string;
   host: string;
   protocol: "http" | "https";
-  apiPort: number;
-  statsPort: number;
+  port: number;
   updatedAt: string;
 };
 
 type PersistedRoutingState = {
-  version: 2;
+  version: 3;
   overrides: Partial<Record<PersistedRoutingServiceKey, PersistedRoutingOverride>>;
   aiEnginePresets: PersistedAiEnginePreset[];
 };
@@ -40,23 +39,21 @@ const DEFAULT_AI_ENGINE_PRESETS: PersistedAiEnginePreset[] = [
     name: "Este PC (192.168.0.14)",
     host: "192.168.0.14",
     protocol: "http",
-    apiPort: 7001,
-    statsPort: 7000,
+    port: 7002,
     updatedAt: "2026-04-19T00:00:00.000Z",
   },
   {
-    id: "stg-vps-relay",
-    name: "VPS staging (195.35.48.40)",
+    id: "workstation-public",
+    name: "Workstation publica (195.35.48.40)",
     host: "195.35.48.40",
     protocol: "http",
-    apiPort: 27001,
-    statsPort: 27000,
+    port: 7002,
     updatedAt: "2026-04-19T00:00:00.000Z",
   },
 ];
 
 const EMPTY_STATE: PersistedRoutingState = {
-  version: 2,
+  version: 3,
   overrides: {},
   aiEnginePresets: DEFAULT_AI_ENGINE_PRESETS.map((entry) => ({ ...entry })),
 };
@@ -71,12 +68,16 @@ function normalizeState(raw: unknown): PersistedRoutingState {
   }
 
   const candidate = raw as { version?: unknown; overrides?: unknown; aiEnginePresets?: unknown };
-  if ((candidate.version !== 1 && candidate.version !== 2) || !candidate.overrides || typeof candidate.overrides !== "object") {
+  if ((candidate.version !== 1 && candidate.version !== 2 && candidate.version !== 3) || !candidate.overrides || typeof candidate.overrides !== "object") {
     return { ...EMPTY_STATE };
   }
 
   const overrides: PersistedRoutingState["overrides"] = {};
   for (const [service, value] of Object.entries(candidate.overrides)) {
+    if (service === "ai-engine-api" || service === "ai-engine-stats") {
+      continue;
+    }
+
     if (!value || typeof value !== "object") {
       continue;
     }
@@ -106,10 +107,18 @@ function normalizeState(raw: unknown): PersistedRoutingState {
         typeof parsed.name !== "string" ||
         typeof parsed.host !== "string" ||
         (parsed.protocol !== "http" && parsed.protocol !== "https") ||
-        typeof parsed.apiPort !== "number" ||
-        typeof parsed.statsPort !== "number" ||
         typeof parsed.updatedAt !== "string"
       ) {
+        if (candidate.version === 2 && typeof parsed.apiPort === "number") {
+          presets.push({
+            id: parsed.id,
+            name: parsed.name,
+            host: parsed.host,
+            protocol: parsed.protocol,
+            port: 7002,
+            updatedAt: parsed.updatedAt,
+          });
+        }
         continue;
       }
 
@@ -118,17 +127,16 @@ function normalizeState(raw: unknown): PersistedRoutingState {
         name: parsed.name,
         host: parsed.host,
         protocol: parsed.protocol,
-        apiPort: parsed.apiPort,
-        statsPort: parsed.statsPort,
+        port: typeof parsed.port === "number" ? parsed.port : 7002,
         updatedAt: parsed.updatedAt,
       });
     }
   }
 
   return {
-    version: 2,
+    version: 3,
     overrides,
-    aiEnginePresets: candidate.version === 1 ? DEFAULT_AI_ENGINE_PRESETS.map((entry) => ({ ...entry })) : presets,
+    aiEnginePresets: candidate.version === 1 ? DEFAULT_AI_ENGINE_PRESETS.map((entry) => ({ ...entry })) : (presets.length > 0 ? presets : DEFAULT_AI_ENGINE_PRESETS.map((entry) => ({ ...entry }))),
   };
 }
 

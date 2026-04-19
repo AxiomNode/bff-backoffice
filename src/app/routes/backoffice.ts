@@ -173,8 +173,7 @@ const GenerationProcessesQuerySchema = z.object({
 const AiEngineTargetSchema = z.object({
   host: z.string().trim().min(1).max(255),
   protocol: z.enum(["http", "https"]).default("http"),
-  apiPort: z.coerce.number().int().min(1).max(65535).default(7001),
-  statsPort: z.coerce.number().int().min(1).max(65535).default(7000),
+  port: z.coerce.number().int().min(1).max(65535).default(7002),
   label: z.string().trim().max(80).optional(),
 });
 
@@ -182,8 +181,7 @@ const AiEnginePresetSchema = z.object({
   name: z.string().trim().min(1).max(80),
   host: z.string().trim().min(1).max(255),
   protocol: z.enum(["http", "https"]).default("http"),
-  apiPort: z.coerce.number().int().min(1).max(65535).default(7001),
-  statsPort: z.coerce.number().int().min(1).max(65535).default(7000),
+  port: z.coerce.number().int().min(1).max(65535).default(7002),
 });
 
 const AiEnginePresetIdParamsSchema = z.object({
@@ -201,11 +199,9 @@ type AiEngineProbeEndpointStatus = {
 type AiEngineProbeResult = {
   host: string;
   protocol: "http" | "https";
-  apiPort: number;
-  statsPort: number;
+  port: number;
   reachable: boolean;
-  api: AiEngineProbeEndpointStatus;
-  stats: AiEngineProbeEndpointStatus;
+  llama: AiEngineProbeEndpointStatus;
 };
 
 const CONFIGURABLE_SERVICE_TARGET_KEYS: ConfigurableServiceTargetKey[] = [
@@ -387,36 +383,13 @@ function parseBaseUrl(url: string): {
   }
 }
 
-function getAiEngineRuntimeTarget(config: AppConfig, routingStore: RoutingStateStore) {
-  const apiBaseUrl = getServiceRuntimeTarget(config, routingStore, "ai-engine-api").baseUrl;
-  const statsBaseUrl = getServiceRuntimeTarget(config, routingStore, "ai-engine-stats").baseUrl;
-  const apiParsed = parseBaseUrl(apiBaseUrl);
-  const statsParsed = parseBaseUrl(statsBaseUrl);
-  const apiOverride = routingStore.get("ai-engine-api");
-  const statsOverride = routingStore.get("ai-engine-stats");
-  const activeOverride = apiOverride ?? statsOverride;
-
-  return {
-    source: activeOverride ? ("override" as const) : ("env" as const),
-    label: activeOverride?.label ?? null,
-    host: apiParsed.host ?? statsParsed.host,
-    protocol: apiParsed.protocol ?? statsParsed.protocol,
-    apiPort: apiParsed.port,
-    statsPort: statsParsed.port,
-    apiBaseUrl,
-    statsBaseUrl,
-    updatedAt: activeOverride?.updatedAt ?? null,
-  };
-}
-
 function getAiEnginePresetPayload(preset: PersistedAiEnginePreset) {
   return {
     id: preset.id,
     name: preset.name,
     host: preset.host,
     protocol: preset.protocol,
-    apiPort: preset.apiPort,
-    statsPort: preset.statsPort,
+    port: preset.port,
     updatedAt: preset.updatedAt,
   };
 }
@@ -645,27 +618,6 @@ async function resetServiceRuntimeTarget(routingStore: RoutingStateStore, servic
   await routingStore.delete(service as PersistedRoutingServiceKey);
 }
 
-async function applyAiEngineRuntimeTarget(config: AppConfig, routingStore: RoutingStateStore, input: z.infer<typeof AiEngineTargetSchema>): Promise<void> {
-  const host = normalizeAiEngineHost(input.host);
-  const label = input.label?.trim() || undefined;
-  const updatedAt = new Date().toISOString();
-  await routingStore.set("ai-engine-api", {
-    baseUrl: buildAiEngineBaseUrl(input.protocol, host, input.apiPort),
-    label,
-    updatedAt,
-  });
-  await routingStore.set("ai-engine-stats", {
-    baseUrl: buildAiEngineBaseUrl(input.protocol, host, input.statsPort),
-    label,
-    updatedAt,
-  });
-}
-
-async function resetAiEngineRuntimeTarget(routingStore: RoutingStateStore): Promise<void> {
-  await routingStore.delete("ai-engine-api");
-  await routingStore.delete("ai-engine-stats");
-}
-
 async function saveAiEnginePreset(
   routingStore: RoutingStateStore,
   presetId: string,
@@ -677,8 +629,7 @@ async function saveAiEnginePreset(
     name: input.name.trim(),
     host,
     protocol: input.protocol,
-    apiPort: input.apiPort,
-    statsPort: input.statsPort,
+    port: input.port,
     updatedAt: new Date().toISOString(),
   };
   await routingStore.setAiEnginePreset(preset);
@@ -731,39 +682,57 @@ async function probeAiEngineTarget(
   input: z.infer<typeof AiEngineTargetSchema>,
 ): Promise<AiEngineProbeResult> {
   const host = normalizeAiEngineHost(input.host);
-  const apiUrl = `${buildAiEngineBaseUrl(input.protocol, host, input.apiPort)}/health`;
-  const statsUrl = `${buildAiEngineBaseUrl(input.protocol, host, input.statsPort)}/health`;
+  const llamaUrl = `${buildAiEngineBaseUrl(input.protocol, host, input.port)}/v1/models`;
   const timeoutMs = Math.min(config.UPSTREAM_TIMEOUT_MS ?? 15000, 8000);
 
-  const [api, stats] = await Promise.all([
-    probeAiEngineEndpoint(apiUrl, resolveServiceApiKey(config, "ai-engine-api"), timeoutMs),
-    probeAiEngineEndpoint(statsUrl, resolveServiceApiKey(config, "ai-engine-stats"), timeoutMs),
-  ]);
+  const llama = await probeAiEngineEndpoint(llamaUrl, undefined, timeoutMs);
 
   return {
     host,
     protocol: input.protocol,
-    apiPort: input.apiPort,
-    statsPort: input.statsPort,
-    reachable: api.ok && stats.ok,
-    api,
-    stats,
+    port: input.port,
+    reachable: llama.ok,
+    llama,
   };
 }
 
-async function syncGatewayAiEngineTarget(
+async function getAiEngineRuntimeTarget(
+  config: AppConfig,
+  routingStore: RoutingStateStore,
+): Promise<Record<string, unknown>> {
+  const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/internal/admin/llama-target", {});
+  const headers: Record<string, string> = {};
+
+  const serviceApiKey = resolveServiceApiKey(config, "ai-engine-api");
+  if (serviceApiKey) {
+    headers["x-api-key"] = serviceApiKey;
+  }
+  const response = await fetch(targetUrl, {
+    method: "GET",
+    headers,
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `ai-engine llama target read failed with HTTP ${response.status}`);
+  }
+
+  return response.json() as Promise<Record<string, unknown>>;
+}
+
+async function syncAiEngineLlamaTarget(
   config: AppConfig,
   routingStore: RoutingStateStore,
   method: "PUT" | "DELETE",
   body?: Record<string, unknown>,
-): Promise<void> {
-  const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "api-gateway"), "/internal/admin/ai-engine/target", {});
+): Promise<Record<string, unknown>> {
+  const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/internal/admin/llama-target", {});
   const headers: Record<string, string> = {};
 
-  if (config.API_GATEWAY_ADMIN_TOKEN?.trim()) {
-    headers.authorization = `Bearer ${config.API_GATEWAY_ADMIN_TOKEN.trim()}`;
+  const serviceApiKey = resolveServiceApiKey(config, "ai-engine-api");
+  if (serviceApiKey) {
+    headers["x-api-key"] = serviceApiKey;
   }
-
   if (body) {
     headers["content-type"] = "application/json";
   }
@@ -776,8 +745,10 @@ async function syncGatewayAiEngineTarget(
 
   if (!response.ok) {
     const message = await response.text();
-    throw new Error(message || `api-gateway ai-engine target sync failed with HTTP ${response.status}`);
+    throw new Error(message || `ai-engine llama target sync failed with HTTP ${response.status}`);
   }
+
+  return response.json() as Promise<Record<string, unknown>>;
 }
 
 function normalizeAuthHeaders(request: FastifyRequest): Record<string, string | undefined> {
@@ -1389,7 +1360,7 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/ai-engine/target", async (_request, reply) => {
-    return reply.send(getAiEngineRuntimeTarget(config, routingStore));
+    return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
   });
 
   app.get("/v1/backoffice/ai-engine/presets", async (_request, reply) => {
@@ -1487,10 +1458,9 @@ export async function backofficeRoutes(
     }
 
     try {
-      await syncGatewayAiEngineTarget(config, routingStore, "PUT", parsed.data as Record<string, unknown>);
-      await applyAiEngineRuntimeTarget(config, routingStore, parsed.data);
+      await syncAiEngineLlamaTarget(config, routingStore, "PUT", parsed.data as Record<string, unknown>);
       clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
-      return reply.send(getAiEngineRuntimeTarget(config, routingStore));
+      return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
     } catch (error) {
       return reply.status(400).send({
         message: error instanceof Error ? error.message : "Invalid ai-engine target",
@@ -1500,10 +1470,9 @@ export async function backofficeRoutes(
 
   app.delete("/v1/backoffice/ai-engine/target", async (_request, reply) => {
     try {
-      await syncGatewayAiEngineTarget(config, routingStore, "DELETE");
-      await resetAiEngineRuntimeTarget(routingStore);
+      await syncAiEngineLlamaTarget(config, routingStore, "DELETE");
       clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
-      return reply.send(getAiEngineRuntimeTarget(config, routingStore));
+      return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
     } catch (error) {
       return reply.status(400).send({
         message: error instanceof Error ? error.message : "Unable to reset ai-engine target",
