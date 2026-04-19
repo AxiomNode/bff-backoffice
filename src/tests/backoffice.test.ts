@@ -187,6 +187,57 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("forwards manual history updates for quiz service", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ item: { id: "entry-2", status: "pending_review" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/v1/backoffice/services/microservice-quiz/data/entry-2",
+      headers: {
+        authorization: "Bearer staff-token",
+      },
+      payload: {
+        dataset: "history",
+        status: "pending_review",
+        content: { question: "Q editada" },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const updateCall = fetchMock.mock.calls.find(([url]) => url === "http://microservice-quizz:7100/games/history/entry-2");
+    expect(updateCall).toBeTruthy();
+    expect(updateCall?.[1]).toEqual(
+      expect.objectContaining({
+        method: "PATCH",
+      }),
+    );
+    expect(JSON.parse(String(updateCall?.[1]?.body))).toEqual({
+      dataset: "history",
+      status: "pending_review",
+      content: { question: "Q editada" },
+    });
+
+    await app.close();
+  });
+
   it("forwards game catalogs from microservice-quiz", async () => {
     const app = Fastify();
 
@@ -228,6 +279,683 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("reuses cached game catalogs within the TTL window", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ categories: [{ id: "9" }], languages: ["es"] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      UPSTREAM_CATALOGS_CACHE_TTL_MS: 60000,
+    }));
+
+    const nowSpy = vi.spyOn(Date, "now");
+    nowSpy.mockReturnValue(1000);
+
+    const first = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-quiz/catalogs",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    nowSpy.mockReturnValue(1500);
+
+    const second = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-quiz/catalogs",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    nowSpy.mockRestore();
+    await app.close();
+  });
+
+  it("reuses cached logs within the TTL window even when the upstream path has query params", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ logs: [{ message: "ok" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      UPSTREAM_METRICS_CACHE_TTL_MS: 5000,
+    }));
+
+    const nowSpy = vi.spyOn(Date, "now");
+    nowSpy.mockReturnValue(1000);
+
+    const first = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-users/logs?limit=20",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    nowSpy.mockReturnValue(1500);
+
+    const second = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-users/logs?limit=20",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    nowSpy.mockRestore();
+    await app.close();
+  });
+
+  it("forwards generation process payloads using itemCount", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ gameType: "quiz", task: { taskId: "task-123", requested: 4 } }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/services/microservice-wordpass/generation/process",
+      headers: {
+        authorization: "Bearer staff-token",
+      },
+      payload: {
+        categoryId: "11",
+        language: "es",
+        difficultyPercentage: 55,
+        itemCount: 4,
+        count: 8,
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://microservice-wordpass:7101/games/generate/process",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          categoryId: "11",
+          language: "es",
+          difficultyPercentage: 55,
+          itemCount: 4,
+          count: 8,
+          requestedBy: "backoffice",
+        }),
+      }),
+    );
+
+    await app.close();
+  });
+
+  it("uses upstream history pagination metadata for quiz data queries", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ items: [{ id: "entry-9" }], total: 87, page: 3, pageSize: 25 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-quiz/data?dataset=history&page=3&pageSize=25&limit=500",
+      headers: {
+        authorization: "Bearer staff-token",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      total: 87,
+      page: 3,
+      pageSize: 25,
+      rows: [{ id: "entry-9" }],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://microservice-quizz:7100/games/history?limit=500&page=3&pageSize=25",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer staff-token",
+        }),
+      }),
+    );
+
+    await app.close();
+  });
+
+  it("forwards dataset process filters to wordpass upstream", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ tasks: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-wordpass/data?dataset=processes&limit=100&status=running&requestedBy=backoffice",
+      headers: {
+        authorization: "Bearer staff-token",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://microservice-wordpass:7101/games/generate/processes?limit=100&status=running&requestedBy=backoffice",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer staff-token",
+        }),
+      }),
+    );
+
+    await app.close();
+  });
+
+  it("filters and sorts roles data in the BFF without changing nested-match behavior", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        users: [
+          { firebaseUid: "uid-1", displayName: "Ana", roles: ["viewer"], score: 20 },
+          { firebaseUid: "uid-2", displayName: "Bruno", roles: ["admin", "editor"], score: 10 },
+          { firebaseUid: "uid-3", displayName: "Carla", roles: ["editor"], score: 30 },
+        ],
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-users/data?dataset=roles&filter=admin&sortBy=score&sortDirection=asc&page=1&pageSize=20&limit=200",
+      headers: {
+        authorization: "Bearer staff-token",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      total: 1,
+      page: 1,
+      pageSize: 20,
+      rows: [
+        expect.objectContaining({
+          firebaseUid: "uid-2",
+          displayName: "Bruno",
+          score: 10,
+        }),
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://microservice-users:7102/users/admin/roles",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer staff-token",
+        }),
+      }),
+    );
+
+    await app.close();
+  });
+
+  it("reuses cached ai diagnostics rag stats within the TTL window", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ total_chunks: 12, coverage_level: "good", sources: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
+      UPSTREAM_METRICS_CACHE_TTL_MS: 5000,
+    }));
+
+    const nowSpy = vi.spyOn(Date, "now");
+    nowSpy.mockReturnValue(2000);
+
+    const first = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/ai-diagnostics/rag/stats",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    nowSpy.mockReturnValue(2500);
+
+    const second = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/ai-diagnostics/rag/stats",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://ai-engine-api:7001/diagnostics/rag/stats",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer staff-token",
+        }),
+      }),
+    );
+
+    nowSpy.mockRestore();
+    await app.close();
+  });
+
+  it("aggregates operational summary server-side for the overview", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "http://microservice-users:7102/monitor/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 25 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://microservice-quizz:7100/monitor/stats") {
+        return Promise.resolve(new Response(JSON.stringify({
+          traffic: { requestsReceivedTotal: 40 },
+          batch: { requestedTotal: 10, createdTotal: 7 },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://microservice-wordpass:7101/monitor/stats") {
+        return Promise.resolve(new Response("upstream unavailable", {
+          status: 503,
+          headers: { "content-type": "text/plain" },
+        }));
+      }
+
+      if (url === "http://localhost:7010/monitor/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 11 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://localhost:7005/monitor/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 13 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://localhost:7000/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ requestsReceivedTotal: 5 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://localhost:7001/health") {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      API_GATEWAY_URL: "http://localhost:7005",
+      BFF_MOBILE_URL: "http://localhost:7010",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+      AI_ENGINE_STATS_URL: "http://localhost:7000",
+      AI_ENGINE_API_URL: "http://localhost:7001",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/operational-summary",
+      headers: {
+        authorization: "Bearer staff-token",
+        "x-correlation-id": "corr-summary-1",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      totals: {
+        total: 8,
+        onlineCount: 7,
+        accessIssues: 0,
+        connectionErrors: 1,
+      },
+    });
+    expect(response.json().rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "microservice-quiz",
+          online: true,
+          requestsTotal: 40,
+          generationRequestedTotal: 10,
+          generationCreatedTotal: 7,
+          generationConversionRatio: 0.7,
+        }),
+        expect.objectContaining({
+          key: "microservice-wordpass",
+          online: false,
+          connectionError: true,
+          errorMessage: "HTTP 503: upstream unavailable",
+        }),
+      ]),
+    );
+
+    const quizCall = fetchMock.mock.calls.find(([url]) => url === "http://microservice-quizz:7100/monitor/stats");
+    expect(quizCall?.[1]).toEqual(
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer staff-token",
+          "x-correlation-id": "corr-summary-1",
+        }),
+      }),
+    );
+
+    await app.close();
+  });
+
+  it("deduplicates concurrent operational summary requests for the same auth context", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => new Promise((resolve) => {
+      setTimeout(() => {
+        if (url === "http://microservice-users:7102/monitor/stats") {
+          resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 25 } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }));
+          return;
+        }
+
+        if (url === "http://microservice-quizz:7100/monitor/stats") {
+          resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 40 } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }));
+          return;
+        }
+
+        if (url === "http://microservice-wordpass:7101/monitor/stats") {
+          resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 30 } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }));
+          return;
+        }
+
+        if (url === "http://localhost:7010/monitor/stats") {
+          resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 11 } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }));
+          return;
+        }
+
+        if (url === "http://localhost:7005/monitor/stats") {
+          resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 13 } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }));
+          return;
+        }
+
+        if (url === "http://localhost:7000/stats") {
+          resolve(new Response(JSON.stringify({ requestsReceivedTotal: 5 }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }));
+          return;
+        }
+
+        if (url === "http://localhost:7001/health") {
+          resolve(new Response(JSON.stringify({ status: "ok" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }));
+          return;
+        }
+
+        resolve(new Response("unexpected", { status: 500 }));
+      }, 5);
+    }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      API_GATEWAY_URL: "http://localhost:7005",
+      BFF_MOBILE_URL: "http://localhost:7010",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+      AI_ENGINE_STATS_URL: "http://localhost:7000",
+      AI_ENGINE_API_URL: "http://localhost:7001",
+    }));
+
+    const [first, second] = await Promise.all([
+      app.inject({
+        method: "GET",
+        url: "/v1/backoffice/services/operational-summary",
+        headers: { authorization: "Bearer same-token" },
+      }),
+      app.inject({
+        method: "GET",
+        url: "/v1/backoffice/services/operational-summary",
+        headers: { authorization: "Bearer same-token" },
+      }),
+    ]);
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+
+    await app.close();
+  });
+
+  it("times out slow upstreams quickly in operational summary without waiting for the global upstream timeout", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (url === "http://microservice-wordpass:7101/monitor/stats") {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = options?.signal;
+          if (signal) {
+            signal.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          }
+        });
+      }
+
+      if (url === "http://microservice-users:7102/monitor/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 25 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://microservice-quizz:7100/monitor/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 40 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://localhost:7010/monitor/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 11 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://localhost:7005/monitor/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ traffic: { requestsReceivedTotal: 13 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://localhost:7000/stats") {
+        return Promise.resolve(new Response(JSON.stringify({ requestsReceivedTotal: 5 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      if (url === "http://localhost:7001/health") {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      API_GATEWAY_URL: "http://localhost:7005",
+      BFF_MOBILE_URL: "http://localhost:7010",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+      AI_ENGINE_STATS_URL: "http://localhost:7000",
+      AI_ENGINE_API_URL: "http://localhost:7001",
+      UPSTREAM_TIMEOUT_MS: 10000,
+      UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS: 50,
+    }));
+
+    const startedAt = Date.now();
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/operational-summary",
+      headers: {
+        authorization: "Bearer staff-token",
+      },
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(response.statusCode).toBe(200);
+    expect(elapsedMs).toBeLessThan(1000);
+    expect(response.json().rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "microservice-wordpass",
+          online: false,
+          connectionError: true,
+          errorMessage: "Upstream request timed out after 50ms",
+        }),
+      ]),
+    );
+
+    await app.close();
+  });
+
   it("includes X-API-Key when requesting ai-engine-stats metrics", async () => {
     const app = Fastify();
 
@@ -264,6 +992,59 @@ describe("backoffice routes", () => {
       }),
     );
 
+    await app.close();
+  });
+
+  it("refreshes metrics after the cache TTL expires", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
+      AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
+      UPSTREAM_METRICS_CACHE_TTL_MS: 1000,
+    }));
+
+    const nowSpy = vi.spyOn(Date, "now");
+    nowSpy.mockReturnValue(2000);
+
+    const first = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/ai-engine-stats/metrics",
+    });
+
+    nowSpy.mockReturnValue(2500);
+
+    const second = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/ai-engine-stats/metrics",
+    });
+
+    nowSpy.mockReturnValue(3105);
+
+    const third = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/ai-engine-stats/metrics",
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(third.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockRestore();
     await app.close();
   });
 
@@ -643,6 +1424,77 @@ describe("backoffice routes", () => {
 
     await appB.close();
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("probes ai-engine runtime targets before activation", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (url === "http://10.0.0.25:17001/health") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ status: "ready" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+
+      if (url === "http://10.0.0.25:17000/health") {
+        expect(options).toMatchObject({
+          headers: expect.objectContaining({
+            "x-api-key": "bridge-key-123",
+          }),
+        });
+
+        return Promise.resolve(
+          new Response(JSON.stringify({ status: "ok" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/ai-engine/probe",
+      payload: {
+        host: "10.0.0.25",
+        protocol: "http",
+        apiPort: 17001,
+        statsPort: 17000,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      host: "10.0.0.25",
+      reachable: true,
+      api: {
+        ok: true,
+        status: 200,
+        url: "http://10.0.0.25:17001/health",
+      },
+      stats: {
+        ok: true,
+        status: 200,
+        url: "http://10.0.0.25:17000/health",
+      },
+    });
+
+    await app.close();
   });
 
   it("resets configurable service target overrides back to env defaults", async () => {

@@ -3,7 +3,11 @@ import "dotenv/config";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
-import { isUpstreamTimeoutError, configureHttpAgent } from "@axiomnode/shared-sdk-client/proxy";
+import {
+  CircuitBreakerOpenError,
+  isUpstreamTimeoutError,
+  configureHttpAgent,
+} from "@axiomnode/shared-sdk-client/proxy";
 
 import { loadConfig } from "./config.js";
 import { backofficeRoutes } from "./routes/backoffice.js";
@@ -91,6 +95,14 @@ async function buildServer() {
       reply.status(504).send({
         message: "Upstream request timed out",
         error: error instanceof Error ? error.message : "Timeout",
+      });
+      return;
+    }
+
+    if (error instanceof CircuitBreakerOpenError) {
+      reply.status(503).send({
+        message: "Upstream temporarily unavailable",
+        error: error.message,
       });
       return;
     }
