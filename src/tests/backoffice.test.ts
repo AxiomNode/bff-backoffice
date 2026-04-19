@@ -535,6 +535,116 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("lists, creates, updates, deletes, and persists shared ai-engine presets", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-presets-"));
+    const stateFile = path.join(tempDir, "routing-state.json");
+
+    const appA = Fastify();
+    vi.stubGlobal("fetch", vi.fn());
+
+    await backofficeRoutes(appA, {
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      BACKOFFICE_ROUTING_STATE_FILE: stateFile,
+    });
+
+    const listResponse = await appA.inject({
+      method: "GET",
+      url: "/v1/backoffice/ai-engine/presets",
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json()).toMatchObject({
+      total: 2,
+      presets: expect.arrayContaining([
+        expect.objectContaining({ id: "this-pc-lan", host: "192.168.0.14" }),
+        expect.objectContaining({ id: "stg-vps-relay", host: "195.35.48.40" }),
+      ]),
+    });
+
+    const createResponse = await appA.inject({
+      method: "POST",
+      url: "/v1/backoffice/ai-engine/presets",
+      payload: {
+        name: "Relay alternativo",
+        host: "10.0.0.25",
+        protocol: "http",
+        apiPort: 18001,
+        statsPort: 18000,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+    const createdPreset = createResponse.json() as { id: string };
+    expect(createdPreset.id).toBeTruthy();
+
+    const updateResponse = await appA.inject({
+      method: "PUT",
+      url: `/v1/backoffice/ai-engine/presets/${createdPreset.id}`,
+      payload: {
+        name: "Relay alternativo v2",
+        host: "10.0.0.26",
+        protocol: "https",
+        apiPort: 18443,
+        statsPort: 18444,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    expect(updateResponse.json()).toMatchObject({
+      id: createdPreset.id,
+      name: "Relay alternativo v2",
+      host: "10.0.0.26",
+      protocol: "https",
+      apiPort: 18443,
+      statsPort: 18444,
+    });
+
+    await appA.close();
+    vi.unstubAllGlobals();
+
+    const appB = Fastify();
+    vi.stubGlobal("fetch", vi.fn());
+
+    await backofficeRoutes(appB, {
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      BACKOFFICE_ROUTING_STATE_FILE: stateFile,
+    });
+
+    const persistedResponse = await appB.inject({
+      method: "GET",
+      url: "/v1/backoffice/ai-engine/presets",
+    });
+
+    expect(persistedResponse.statusCode).toBe(200);
+    expect(persistedResponse.json()).toMatchObject({
+      presets: expect.arrayContaining([
+        expect.objectContaining({
+          id: createdPreset.id,
+          name: "Relay alternativo v2",
+          host: "10.0.0.26",
+          protocol: "https",
+        }),
+      ]),
+    });
+
+    const deleteResponse = await appB.inject({
+      method: "DELETE",
+      url: `/v1/backoffice/ai-engine/presets/${createdPreset.id}`,
+    });
+
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleteResponse.json()).toEqual({ deleted: true, presetId: createdPreset.id });
+
+    await appB.close();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
   it("resets configurable service target overrides back to env defaults", async () => {
     const app = Fastify();
 
