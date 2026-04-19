@@ -18,14 +18,47 @@ export type PersistedRoutingOverride = {
   updatedAt: string;
 };
 
-type PersistedRoutingState = {
-  version: 1;
-  overrides: Partial<Record<PersistedRoutingServiceKey, PersistedRoutingOverride>>;
+export type PersistedAiEnginePreset = {
+  id: string;
+  name: string;
+  host: string;
+  protocol: "http" | "https";
+  apiPort: number;
+  statsPort: number;
+  updatedAt: string;
 };
 
+type PersistedRoutingState = {
+  version: 2;
+  overrides: Partial<Record<PersistedRoutingServiceKey, PersistedRoutingOverride>>;
+  aiEnginePresets: PersistedAiEnginePreset[];
+};
+
+const DEFAULT_AI_ENGINE_PRESETS: PersistedAiEnginePreset[] = [
+  {
+    id: "this-pc-lan",
+    name: "Este PC (192.168.0.14)",
+    host: "192.168.0.14",
+    protocol: "http",
+    apiPort: 7001,
+    statsPort: 7000,
+    updatedAt: "2026-04-19T00:00:00.000Z",
+  },
+  {
+    id: "stg-vps-relay",
+    name: "VPS staging (195.35.48.40)",
+    host: "195.35.48.40",
+    protocol: "http",
+    apiPort: 27001,
+    statsPort: 27000,
+    updatedAt: "2026-04-19T00:00:00.000Z",
+  },
+];
+
 const EMPTY_STATE: PersistedRoutingState = {
-  version: 1,
+  version: 2,
   overrides: {},
+  aiEnginePresets: DEFAULT_AI_ENGINE_PRESETS.map((entry) => ({ ...entry })),
 };
 
 function defaultStateFilePath(): string {
@@ -37,8 +70,8 @@ function normalizeState(raw: unknown): PersistedRoutingState {
     return { ...EMPTY_STATE };
   }
 
-  const candidate = raw as { version?: unknown; overrides?: unknown };
-  if (candidate.version !== 1 || !candidate.overrides || typeof candidate.overrides !== "object") {
+  const candidate = raw as { version?: unknown; overrides?: unknown; aiEnginePresets?: unknown };
+  if ((candidate.version !== 1 && candidate.version !== 2) || !candidate.overrides || typeof candidate.overrides !== "object") {
     return { ...EMPTY_STATE };
   }
 
@@ -60,9 +93,42 @@ function normalizeState(raw: unknown): PersistedRoutingState {
     };
   }
 
+  const presets: PersistedAiEnginePreset[] = [];
+  if (Array.isArray(candidate.aiEnginePresets)) {
+    for (const value of candidate.aiEnginePresets) {
+      if (!value || typeof value !== "object") {
+        continue;
+      }
+
+      const parsed = value as Record<string, unknown>;
+      if (
+        typeof parsed.id !== "string" ||
+        typeof parsed.name !== "string" ||
+        typeof parsed.host !== "string" ||
+        (parsed.protocol !== "http" && parsed.protocol !== "https") ||
+        typeof parsed.apiPort !== "number" ||
+        typeof parsed.statsPort !== "number" ||
+        typeof parsed.updatedAt !== "string"
+      ) {
+        continue;
+      }
+
+      presets.push({
+        id: parsed.id,
+        name: parsed.name,
+        host: parsed.host,
+        protocol: parsed.protocol,
+        apiPort: parsed.apiPort,
+        statsPort: parsed.statsPort,
+        updatedAt: parsed.updatedAt,
+      });
+    }
+  }
+
   return {
-    version: 1,
+    version: 2,
     overrides,
+    aiEnginePresets: candidate.version === 1 ? DEFAULT_AI_ENGINE_PRESETS.map((entry) => ({ ...entry })) : presets,
   };
 }
 
@@ -95,6 +161,10 @@ export class RoutingStateStore {
     return { ...this.state.overrides };
   }
 
+  listAiEnginePresets(): PersistedAiEnginePreset[] {
+    return this.state.aiEnginePresets.map((entry) => ({ ...entry }));
+  }
+
   async set(service: PersistedRoutingServiceKey, override: PersistedRoutingOverride): Promise<void> {
     this.state = {
       ...this.state,
@@ -114,6 +184,32 @@ export class RoutingStateStore {
       overrides: nextOverrides,
     };
     await this.persist();
+  }
+
+  async setAiEnginePreset(preset: PersistedAiEnginePreset): Promise<void> {
+    const nextPresets = this.state.aiEnginePresets.some((entry) => entry.id === preset.id)
+      ? this.state.aiEnginePresets.map((entry) => (entry.id === preset.id ? preset : entry))
+      : [...this.state.aiEnginePresets, preset];
+
+    this.state = {
+      ...this.state,
+      aiEnginePresets: nextPresets,
+    };
+    await this.persist();
+  }
+
+  async deleteAiEnginePreset(id: string): Promise<boolean> {
+    const nextPresets = this.state.aiEnginePresets.filter((entry) => entry.id !== id);
+    if (nextPresets.length === this.state.aiEnginePresets.length) {
+      return false;
+    }
+
+    this.state = {
+      ...this.state,
+      aiEnginePresets: nextPresets,
+    };
+    await this.persist();
+    return true;
   }
 
   private async persist(): Promise<void> {

@@ -1,11 +1,17 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { randomUUID } from "node:crypto";
 import { LeaderboardQuerySchema } from "@axiomnode/shared-sdk-client/contracts";
 import { UpstreamTimeoutError, buildUrl, forwardHttp } from "@axiomnode/shared-sdk-client/proxy";
 import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
 import { ServiceMetrics } from "../services/serviceMetrics.js";
-import { RoutingStateStore, type PersistedRoutingServiceKey, type PersistedRoutingOverride } from "../services/routingStateStore.js";
+import {
+  RoutingStateStore,
+  type PersistedAiEnginePreset,
+  type PersistedRoutingServiceKey,
+  type PersistedRoutingOverride,
+} from "../services/routingStateStore.js";
 
 /** @module backoffice — Backoffice routes for auth, users, service catalog, data CRUD, and AI diagnostics. */
 
@@ -126,6 +132,18 @@ const AiEngineTargetSchema = z.object({
   apiPort: z.coerce.number().int().min(1).max(65535).default(7001),
   statsPort: z.coerce.number().int().min(1).max(65535).default(7000),
   label: z.string().trim().max(80).optional(),
+});
+
+const AiEnginePresetSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  host: z.string().trim().min(1).max(255),
+  protocol: z.enum(["http", "https"]).default("http"),
+  apiPort: z.coerce.number().int().min(1).max(65535).default(7001),
+  statsPort: z.coerce.number().int().min(1).max(65535).default(7000),
+});
+
+const AiEnginePresetIdParamsSchema = z.object({
+  presetId: z.string().trim().min(1).max(120),
 });
 
 const CONFIGURABLE_SERVICE_TARGET_KEYS: ConfigurableServiceTargetKey[] = [
@@ -295,6 +313,26 @@ function getAiEngineRuntimeTarget(config: AppConfig, routingStore: RoutingStateS
   };
 }
 
+function getAiEnginePresetPayload(preset: PersistedAiEnginePreset) {
+  return {
+    id: preset.id,
+    name: preset.name,
+    host: preset.host,
+    protocol: preset.protocol,
+    apiPort: preset.apiPort,
+    statsPort: preset.statsPort,
+    updatedAt: preset.updatedAt,
+  };
+}
+
+function getAiEnginePresetList(routingStore: RoutingStateStore) {
+  const presets = routingStore.listAiEnginePresets().map(getAiEnginePresetPayload);
+  return {
+    total: presets.length,
+    presets,
+  };
+}
+
 function getServiceCatalogTitle(service: ServiceKey): string {
   return SERVICE_CATALOG.find((entry) => entry.key === service)?.title ?? service;
 }
@@ -385,6 +423,25 @@ async function applyAiEngineRuntimeTarget(config: AppConfig, routingStore: Routi
 async function resetAiEngineRuntimeTarget(routingStore: RoutingStateStore): Promise<void> {
   await routingStore.delete("ai-engine-api");
   await routingStore.delete("ai-engine-stats");
+}
+
+async function saveAiEnginePreset(
+  routingStore: RoutingStateStore,
+  presetId: string,
+  input: z.infer<typeof AiEnginePresetSchema>,
+): Promise<PersistedAiEnginePreset> {
+  const host = normalizeAiEngineHost(input.host);
+  const preset: PersistedAiEnginePreset = {
+    id: presetId,
+    name: input.name.trim(),
+    host,
+    protocol: input.protocol,
+    apiPort: input.apiPort,
+    statsPort: input.statsPort,
+    updatedAt: new Date().toISOString(),
+  };
+  await routingStore.setAiEnginePreset(preset);
+  return preset;
 }
 
 async function syncGatewayAiEngineTarget(
@@ -769,6 +826,76 @@ export async function backofficeRoutes(
   app.get("/v1/backoffice/ai-engine/target", async (_request, reply) => {
     await refreshRoutingState();
     return reply.send(getAiEngineRuntimeTarget(config, routingStore));
+  });
+
+  app.get("/v1/backoffice/ai-engine/presets", async (_request, reply) => {
+    await refreshRoutingState();
+    return reply.send(getAiEnginePresetList(routingStore));
+  });
+
+  app.post("/v1/backoffice/ai-engine/presets", async (request, reply) => {
+    await refreshRoutingState();
+    const parsed = AiEnginePresetSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsed.error.flatten(),
+      });
+    }
+
+    try {
+      const preset = await saveAiEnginePreset(routingStore, randomUUID(), parsed.data);
+      return reply.status(201).send(getAiEnginePresetPayload(preset));
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Invalid ai-engine preset",
+      });
+    }
+  });
+
+  app.put("/v1/backoffice/ai-engine/presets/:presetId", async (request, reply) => {
+    await refreshRoutingState();
+    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
+    if (!parsedParams.success) {
+      return reply.status(400).send({ message: "Invalid preset id" });
+    }
+
+    const parsedBody = AiEnginePresetSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsedBody.error.flatten(),
+      });
+    }
+
+    const exists = routingStore.listAiEnginePresets().some((entry) => entry.id === parsedParams.data.presetId);
+    if (!exists) {
+      return reply.status(404).send({ message: "Preset not found" });
+    }
+
+    try {
+      const preset = await saveAiEnginePreset(routingStore, parsedParams.data.presetId, parsedBody.data);
+      return reply.send(getAiEnginePresetPayload(preset));
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Invalid ai-engine preset",
+      });
+    }
+  });
+
+  app.delete("/v1/backoffice/ai-engine/presets/:presetId", async (request, reply) => {
+    await refreshRoutingState();
+    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
+    if (!parsedParams.success) {
+      return reply.status(400).send({ message: "Invalid preset id" });
+    }
+
+    const deleted = await routingStore.deleteAiEnginePreset(parsedParams.data.presetId);
+    if (!deleted) {
+      return reply.status(404).send({ message: "Preset not found" });
+    }
+
+    return reply.send({ deleted: true, presetId: parsedParams.data.presetId });
   });
 
   app.put("/v1/backoffice/ai-engine/target", async (request, reply) => {
