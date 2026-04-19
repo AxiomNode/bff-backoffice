@@ -14,6 +14,11 @@ const envSchema = z.object({
   AI_ENGINE_STATS_URL: z.string().url().default("http://localhost:7000"),
   AI_ENGINE_API_URL: z.string().url().default("http://localhost:7001"),
   UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
+  UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS: z.coerce.number().int().min(250).max(120000).default(3000),
+  UPSTREAM_METRICS_CACHE_TTL_MS: z.coerce.number().int().min(0).max(60000).default(5000),
+  UPSTREAM_CATALOGS_CACHE_TTL_MS: z.coerce.number().int().min(0).max(600000).default(60000),
+  UPSTREAM_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(20).default(3),
+  UPSTREAM_CIRCUIT_RESET_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(30000),
   AI_ENGINE_BRIDGE_API_KEY: z.string().optional(),
   AI_ENGINE_API_KEY: z.string().optional(),
   API_GATEWAY_ADMIN_TOKEN: z.string().optional(),
@@ -34,6 +39,11 @@ export type AppConfig = Omit<
   | "AI_ENGINE_STATS_URL"
   | "AI_ENGINE_API_URL"
   | "UPSTREAM_TIMEOUT_MS"
+  | "UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS"
+  | "UPSTREAM_METRICS_CACHE_TTL_MS"
+  | "UPSTREAM_CATALOGS_CACHE_TTL_MS"
+  | "UPSTREAM_CIRCUIT_FAILURE_THRESHOLD"
+  | "UPSTREAM_CIRCUIT_RESET_TIMEOUT_MS"
   | "AI_ENGINE_BRIDGE_API_KEY"
   | "AI_ENGINE_API_KEY"
   | "API_GATEWAY_ADMIN_TOKEN"
@@ -48,6 +58,11 @@ export type AppConfig = Omit<
   AI_ENGINE_STATS_URL?: string;
   AI_ENGINE_API_URL?: string;
   UPSTREAM_TIMEOUT_MS?: number;
+  UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS?: number;
+  UPSTREAM_METRICS_CACHE_TTL_MS?: number;
+  UPSTREAM_CATALOGS_CACHE_TTL_MS?: number;
+  UPSTREAM_CIRCUIT_FAILURE_THRESHOLD?: number;
+  UPSTREAM_CIRCUIT_RESET_TIMEOUT_MS?: number;
   AI_ENGINE_BRIDGE_API_KEY?: string;
   AI_ENGINE_API_KEY?: string;
   API_GATEWAY_ADMIN_TOKEN?: string;

@@ -1,7 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { LeaderboardQuerySchema } from "@axiomnode/shared-sdk-client/contracts";
-import { UpstreamTimeoutError, buildUrl, forwardHttp } from "@axiomnode/shared-sdk-client/proxy";
+import {
+  CircuitBreaker,
+  UpstreamTimeoutError,
+  buildUrl,
+  forwardHttp,
+} from "@axiomnode/shared-sdk-client/proxy";
 import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
@@ -74,6 +79,8 @@ const DataQuerySchema = z.object({
   sortDirection: z.enum(["asc", "desc"]).default("asc"),
   filter: z.string().default(""),
   metric: z.enum(["won", "score", "played"]).default("won"),
+  status: z.enum(["running", "completed", "failed"]).optional(),
+  requestedBy: z.enum(["api", "backoffice"]).optional(),
   language: z.string().min(2).max(5).optional(),
   categoryId: z.string().min(1).optional(),
   difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
@@ -92,7 +99,20 @@ const DataMutationSchema = z.object({
   content: z.record(z.unknown()).refine((value) => Object.keys(value).length > 0, {
     message: "content must include at least one field",
   }),
-  status: z.enum(["manual", "validated"]).default("manual"),
+  status: z.enum(["manual", "validated", "pending_review"]).default("manual"),
+});
+
+const DataUpdateSchema = z.object({
+  dataset: z.literal("history"),
+  categoryId: z.string().min(1).optional(),
+  language: z.string().min(2).max(5).optional(),
+  difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
+  content: z.record(z.unknown()).refine((value) => Object.keys(value).length > 0, {
+    message: "content must include at least one field",
+  }).optional(),
+  status: z.enum(["manual", "validated", "pending_review"]).optional(),
+}).refine((value) => Object.keys(value).some((key) => key !== "dataset"), {
+  message: "At least one editable field is required",
 });
 
 const DataDeleteQuerySchema = z.object({
@@ -107,10 +127,34 @@ const GenerationProcessStartSchema = z.object({
   categoryId: z.string().min(1),
   language: z.string().min(2).max(5),
   difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
+  itemCount: z.coerce.number().int().min(1).max(50).optional(),
   numQuestions: z.coerce.number().int().min(1).max(50).optional(),
   letters: z.string().optional(),
   count: z.coerce.number().int().min(1).max(100).default(10),
 });
+
+function normalizeGenerationProcessPayload(
+  payload: z.infer<typeof GenerationProcessStartSchema>,
+): {
+  categoryId: string;
+  language: string;
+  difficultyPercentage?: number;
+  itemCount?: number;
+  count: number;
+  requestedBy: "backoffice";
+} {
+  const itemCount = payload.itemCount ?? payload.numQuestions;
+  return {
+    categoryId: payload.categoryId,
+    language: payload.language,
+    ...(typeof payload.difficultyPercentage === "number"
+      ? { difficultyPercentage: payload.difficultyPercentage }
+      : {}),
+    ...(typeof itemCount === "number" ? { itemCount } : {}),
+    count: payload.count,
+    requestedBy: "backoffice",
+  };
+}
 
 const GenerationTaskParamsSchema = z.object({
   taskId: z.string().uuid(),
@@ -146,6 +190,24 @@ const AiEnginePresetIdParamsSchema = z.object({
   presetId: z.string().trim().min(1).max(120),
 });
 
+type AiEngineProbeEndpointStatus = {
+  ok: boolean;
+  status: number | null;
+  url: string;
+  latencyMs: number | null;
+  message: string | null;
+};
+
+type AiEngineProbeResult = {
+  host: string;
+  protocol: "http" | "https";
+  apiPort: number;
+  statsPort: number;
+  reachable: boolean;
+  api: AiEngineProbeEndpointStatus;
+  stats: AiEngineProbeEndpointStatus;
+};
+
 const CONFIGURABLE_SERVICE_TARGET_KEYS: ConfigurableServiceTargetKey[] = [
   "api-gateway",
   "bff-mobile",
@@ -157,6 +219,40 @@ const CONFIGURABLE_SERVICE_TARGET_KEYS: ConfigurableServiceTargetKey[] = [
 ];
 
 type Row = Record<string, unknown>;
+
+type ServiceOperationalRowPayload = {
+  key: string;
+  title: string;
+  domain: string;
+  supportsData: boolean;
+  online: boolean;
+  accessGuaranteed: boolean;
+  connectionError: boolean;
+  requestsTotal: number | null;
+  requestsPerSecond: number | null;
+  generationRequestedTotal: number | null;
+  generationCreatedTotal: number | null;
+  generationConversionRatio: number | null;
+  latencyMs: number | null;
+  lastUpdatedAt: string | null;
+  errorMessage: string | null;
+  lastKnownError: null;
+};
+
+type ServiceOperationalSummaryPayload = {
+  rows: ServiceOperationalRowPayload[];
+  totals: {
+    total: number;
+    onlineCount: number;
+    accessIssues: number;
+    connectionErrors: number;
+  };
+};
+
+type CachedUpstreamResponse = {
+  payload: unknown;
+  expiresAt: number;
+};
 
 const SERVICE_CATALOG: Array<{
   key: ServiceKey;
@@ -337,6 +433,151 @@ function getServiceCatalogTitle(service: ServiceKey): string {
   return SERVICE_CATALOG.find((entry) => entry.key === service)?.title ?? service;
 }
 
+function getUpstreamCacheTtlMs(config: AppConfig, path: string): number {
+  const normalizedPath = path.split("?", 1)[0] ?? path;
+
+  if (normalizedPath === "/catalogs") {
+    return config.UPSTREAM_CATALOGS_CACHE_TTL_MS ?? 60000;
+  }
+
+  if (
+    normalizedPath === "/monitor/stats" ||
+    normalizedPath === "/stats" ||
+    normalizedPath === "/health" ||
+    normalizedPath === "/monitor/logs" ||
+    normalizedPath === "/stats/history" ||
+    normalizedPath === "/diagnostics/rag/stats"
+  ) {
+    return config.UPSTREAM_METRICS_CACHE_TTL_MS ?? 5000;
+  }
+
+  return 0;
+}
+
+function buildUpstreamCacheKey(target: string, headers: Record<string, string>): string {
+  return JSON.stringify({
+    target,
+    authorization: headers.authorization ?? null,
+    firebaseToken: headers["x-firebase-id-token"] ?? null,
+    devUid: headers["x-dev-firebase-uid"] ?? null,
+    apiKey: headers["x-api-key"] ?? null,
+  });
+}
+
+function getUpstreamBreaker(
+  breakers: Map<string, CircuitBreaker>,
+  config: AppConfig,
+  target: string,
+): CircuitBreaker {
+  const key = new URL(target).origin;
+  let breaker = breakers.get(key);
+  if (!breaker) {
+    breaker = new CircuitBreaker({
+      failureThreshold: config.UPSTREAM_CIRCUIT_FAILURE_THRESHOLD ?? 3,
+      resetTimeoutMs: config.UPSTREAM_CIRCUIT_RESET_TIMEOUT_MS ?? 30000,
+    });
+    breakers.set(key, breaker);
+  }
+  return breaker;
+}
+
+function clearUpstreamRuntimeState(
+  upstreamCache: Map<string, CachedUpstreamResponse>,
+  upstreamBreakers: Map<string, CircuitBreaker>,
+): void {
+  upstreamCache.clear();
+  upstreamBreakers.clear();
+}
+
+function buildOperationalSummaryRuntimeKey(request: FastifyRequest): string {
+  const headers = normalizeAuthHeaders(request);
+  const summaryHeaders: Record<string, string> = {};
+
+  if (headers.authorization) {
+    summaryHeaders.authorization = headers.authorization;
+  }
+  if (headers["x-firebase-id-token"]) {
+    summaryHeaders["x-firebase-id-token"] = headers["x-firebase-id-token"];
+  }
+  if (headers["x-dev-firebase-uid"]) {
+    summaryHeaders["x-dev-firebase-uid"] = headers["x-dev-firebase-uid"];
+  }
+  if (headers["x-api-key"]) {
+    summaryHeaders["x-api-key"] = headers["x-api-key"];
+  }
+
+  return buildUpstreamCacheKey("operational-summary", summaryHeaders);
+}
+
+function toRequestsTotal(metrics: unknown): number | null {
+  if (!metrics || typeof metrics !== "object") {
+    return null;
+  }
+
+  const payload = metrics as Record<string, unknown>;
+  const traffic = payload.traffic;
+
+  if (traffic && typeof traffic === "object") {
+    const value = (traffic as Record<string, unknown>).requestsReceivedTotal;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  const topLevel = payload.requestsReceivedTotal;
+  if (typeof topLevel === "number" && Number.isFinite(topLevel)) {
+    return topLevel;
+  }
+
+  return null;
+}
+
+function toGenerationConversion(metrics: unknown): {
+  requestedTotal: number | null;
+  createdTotal: number | null;
+  conversionRatio: number | null;
+} {
+  if (!metrics || typeof metrics !== "object") {
+    return { requestedTotal: null, createdTotal: null, conversionRatio: null };
+  }
+
+  const payload = metrics as Record<string, unknown>;
+  const batch = payload.batch;
+
+  if (!batch || typeof batch !== "object") {
+    return { requestedTotal: null, createdTotal: null, conversionRatio: null };
+  }
+
+  const batchPayload = batch as Record<string, unknown>;
+  const requestedValue = batchPayload.requestedTotal;
+  const createdValue = batchPayload.createdTotal;
+
+  const requestedTotal = typeof requestedValue === "number" && Number.isFinite(requestedValue)
+    ? requestedValue
+    : null;
+  const createdTotal = typeof createdValue === "number" && Number.isFinite(createdValue)
+    ? createdValue
+    : null;
+
+  if (requestedTotal === null || createdTotal === null || requestedTotal <= 0) {
+    return { requestedTotal, createdTotal, conversionRatio: null };
+  }
+
+  return {
+    requestedTotal,
+    createdTotal,
+    conversionRatio: Number((createdTotal / requestedTotal).toFixed(4)),
+  };
+}
+
+function isAuthorizationError(message: string): boolean {
+  return /HTTP\s+(401|403)/i.test(message);
+}
+
+function isConnectionError(message: string): boolean {
+  return /Failed to fetch|NetworkError|timed out|timeout|HTTP\s+(5\d\d|429|408|0)/i.test(message);
+}
+
 function getEnvServiceBaseUrl(config: AppConfig, service: ConfigurableServiceTargetKey): string {
   switch (service) {
     case "api-gateway":
@@ -444,6 +685,72 @@ async function saveAiEnginePreset(
   return preset;
 }
 
+async function probeAiEngineEndpoint(
+  url: string,
+  apiKey: string | undefined,
+  timeoutMs: number,
+): Promise<AiEngineProbeEndpointStatus> {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
+  const headers: Record<string, string> = {};
+
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+
+  try {
+    const response = await fetch(url, {
+      headers,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      url,
+      latencyMs: Date.now() - startedAt,
+      message: response.ok ? null : text || response.statusText || `HTTP ${response.status}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      url,
+      latencyMs: Date.now() - startedAt,
+      message: error instanceof Error ? error.message : "Probe failed",
+    };
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function probeAiEngineTarget(
+  config: AppConfig,
+  input: z.infer<typeof AiEngineTargetSchema>,
+): Promise<AiEngineProbeResult> {
+  const host = normalizeAiEngineHost(input.host);
+  const apiUrl = `${buildAiEngineBaseUrl(input.protocol, host, input.apiPort)}/health`;
+  const statsUrl = `${buildAiEngineBaseUrl(input.protocol, host, input.statsPort)}/health`;
+  const timeoutMs = Math.min(config.UPSTREAM_TIMEOUT_MS ?? 15000, 8000);
+
+  const [api, stats] = await Promise.all([
+    probeAiEngineEndpoint(apiUrl, resolveServiceApiKey(config, "ai-engine-api"), timeoutMs),
+    probeAiEngineEndpoint(statsUrl, resolveServiceApiKey(config, "ai-engine-stats"), timeoutMs),
+  ]);
+
+  return {
+    host,
+    protocol: input.protocol,
+    apiPort: input.apiPort,
+    statsPort: input.statsPort,
+    reachable: api.ok && stats.ok,
+    api,
+    stats,
+  };
+}
+
 async function syncGatewayAiEngineTarget(
   config: AppConfig,
   routingStore: RoutingStateStore,
@@ -508,6 +815,26 @@ function toComparable(value: unknown): string | number {
   }
 }
 
+function toSearchableString(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value.toLowerCase();
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value).toLowerCase();
+  }
+
+  try {
+    return JSON.stringify(value).toLowerCase();
+  } catch {
+    return String(value).toLowerCase();
+  }
+}
+
 function applyRowsQuery(
   rows: Row[],
   query: z.infer<typeof DataQuerySchema>,
@@ -516,18 +843,20 @@ function applyRowsQuery(
 
   const filterTerm = query.filter.trim().toLowerCase();
   if (filterTerm.length > 0) {
-    nextRows = nextRows.filter((row) =>
-      Object.values(row).some((value) => {
-        if (value === null || value === undefined) {
-          return false;
-        }
-        try {
-          return JSON.stringify(value).toLowerCase().includes(filterTerm);
-        } catch {
-          return String(value).toLowerCase().includes(filterTerm);
-        }
-      }),
-    );
+    const searchableByRow = new Map<Row, string>();
+
+    nextRows = nextRows.filter((row) => {
+      let searchable = searchableByRow.get(row);
+      if (!searchable) {
+        searchable = Object.values(row)
+          .map((value) => toSearchableString(value))
+          .filter((value) => value.length > 0)
+          .join(" ");
+        searchableByRow.set(row, searchable);
+      }
+
+      return searchable.includes(filterTerm);
+    });
   }
 
   if (query.sortBy) {
@@ -587,6 +916,9 @@ async function fetchJsonFromService(
   routingStore: RoutingStateStore,
   path: string,
   request: FastifyRequest,
+  upstreamCache: Map<string, CachedUpstreamResponse>,
+  upstreamBreakers: Map<string, CircuitBreaker>,
+  timeoutOverrideMs?: number,
 ): Promise<unknown> {
   const headers = normalizeAuthHeaders(request);
   const target = buildUrl(serviceBaseUrl(config, routingStore, service), path, {});
@@ -605,39 +937,88 @@ async function fetchJsonFromService(
     outgoingHeaders["x-api-key"] = serviceApiKey;
   }
 
-  const timeoutMs = config.UPSTREAM_TIMEOUT_MS ?? 15000;
-  const controller = new AbortController();
-  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-
-  let response: Response;
-  try {
-    response = await fetch(target, {
-      headers: outgoingHeaders,
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new UpstreamTimeoutError(`Upstream request timed out after ${timeoutMs}ms`);
+  const cacheTtlMs = getUpstreamCacheTtlMs(config, path);
+  const cacheKey = buildUpstreamCacheKey(target, outgoingHeaders);
+  if (cacheTtlMs > 0) {
+    const cached = upstreamCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.payload;
     }
-    throw error;
-  } finally {
-    clearTimeout(timeoutHandle);
+    if (cached) {
+      upstreamCache.delete(cacheKey);
+    }
   }
+
+  const timeoutMs = timeoutOverrideMs ?? config.UPSTREAM_TIMEOUT_MS ?? 15000;
+  const breaker = getUpstreamBreaker(upstreamBreakers, config, target);
+  const response = await breaker.call(async () => {
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      return await fetch(target, {
+        headers: outgoingHeaders,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new UpstreamTimeoutError(`Upstream request timed out after ${timeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+  });
 
   const text = await response.text();
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
   }
 
+  let payload: unknown;
   if (!text) {
-    return {};
+    payload = {};
+  } else {
+    try {
+      payload = JSON.parse(text) as unknown;
+    } catch {
+      payload = { raw: text };
+    }
   }
 
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return { raw: text };
+  if (cacheTtlMs > 0) {
+    upstreamCache.set(cacheKey, {
+      payload,
+      expiresAt: Date.now() + cacheTtlMs,
+    });
   }
+
+  return payload;
+}
+
+async function fetchMetricsSnapshot(
+  service: ServiceKey,
+  config: AppConfig,
+  routingStore: RoutingStateStore,
+  request: FastifyRequest,
+  runtimeMetrics: Pick<ServiceMetrics, "snapshot">,
+  upstreamCache: Map<string, CachedUpstreamResponse>,
+  upstreamBreakers: Map<string, CircuitBreaker>,
+  timeoutOverrideMs?: number,
+): Promise<unknown> {
+  if (service === "bff-backoffice") {
+    return runtimeMetrics.snapshot();
+  }
+
+  if (service === "ai-engine-stats") {
+    return fetchJsonFromService(service, config, routingStore, "/stats", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
+  }
+
+  if (service === "ai-engine-api") {
+    return fetchJsonFromService(service, config, routingStore, "/health", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
+  }
+
+  return fetchJsonFromService(service, config, routingStore, "/monitor/stats", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
 }
 
 async function forwardRequest(
@@ -674,29 +1055,43 @@ async function readDatasetRows(
   config: AppConfig,
   routingStore: RoutingStateStore,
   request: FastifyRequest,
-): Promise<Row[]> {
+  upstreamCache: Map<string, CachedUpstreamResponse>,
+  upstreamBreakers: Map<string, CircuitBreaker>,
+): Promise<{ rows: Row[]; total?: number; page?: number; pageSize?: number }> {
   if (service === "microservice-users" && dataset === "roles") {
-    const payload = (await fetchJsonFromService(service, config, routingStore, "/users/admin/roles", request)) as {
+    const payload = (await fetchJsonFromService(
+      service,
+      config,
+      routingStore,
+      "/users/admin/roles",
+      request,
+      upstreamCache,
+      upstreamBreakers,
+    )) as {
       users?: Array<Record<string, unknown>>;
     };
-    return payload.users ?? [];
+    return { rows: payload.users ?? [] };
   }
 
   if (service === "microservice-users" && dataset === "leaderboard") {
     const path = `/users/leaderboard?metric=${encodeURIComponent(query.metric)}&limit=${query.limit}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as {
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as {
       rows?: Array<Record<string, unknown>>;
       metric?: string;
     };
-    return (payload.rows ?? []).map((row, index) => ({
+    return { rows: (payload.rows ?? []).map((row, index) => ({
       rank: index + 1,
       metric: payload.metric ?? query.metric,
       ...row,
-    }));
+    })) };
   }
 
   if (service === "microservice-quiz" && dataset === "history") {
-    const params = new URLSearchParams({ limit: String(query.limit) });
+    const params = new URLSearchParams({
+      limit: String(query.limit),
+      page: String(query.page),
+      pageSize: String(query.pageSize),
+    });
     if (query.categoryId) {
       params.set("categoryId", query.categoryId);
     }
@@ -706,19 +1101,43 @@ async function readDatasetRows(
     if (typeof query.difficultyPercentage === "number") {
       params.set("difficultyPercentage", String(query.difficultyPercentage));
     }
+    if (query.status) {
+      params.set("status", query.status);
+    }
     const path = `/games/history?${params.toString()}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as { items?: Array<Record<string, unknown>> };
-    return payload.items ?? [];
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as {
+      items?: Array<Record<string, unknown>>;
+      total?: number;
+      page?: number;
+      pageSize?: number;
+    };
+    return {
+      rows: payload.items ?? [],
+      total: payload.total,
+      page: payload.page,
+      pageSize: payload.pageSize,
+    };
   }
 
   if (service === "microservice-quiz" && dataset === "processes") {
-    const path = `/games/generate/processes?limit=${query.limit}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as { tasks?: Array<Record<string, unknown>> };
-    return payload.tasks ?? [];
+    const params = new URLSearchParams({ limit: String(query.limit) });
+    if (query.status) {
+      params.set("status", query.status);
+    }
+    if (query.requestedBy) {
+      params.set("requestedBy", query.requestedBy);
+    }
+    const path = `/games/generate/processes?${params.toString()}`;
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as { tasks?: Array<Record<string, unknown>> };
+    return { rows: payload.tasks ?? [] };
   }
 
   if (service === "microservice-wordpass" && dataset === "history") {
-    const params = new URLSearchParams({ limit: String(query.limit) });
+    const params = new URLSearchParams({
+      limit: String(query.limit),
+      page: String(query.page),
+      pageSize: String(query.pageSize),
+    });
     if (query.categoryId) {
       params.set("categoryId", query.categoryId);
     }
@@ -728,15 +1147,35 @@ async function readDatasetRows(
     if (typeof query.difficultyPercentage === "number") {
       params.set("difficultyPercentage", String(query.difficultyPercentage));
     }
+    if (query.status) {
+      params.set("status", query.status);
+    }
     const path = `/games/history?${params.toString()}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as { items?: Array<Record<string, unknown>> };
-    return payload.items ?? [];
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as {
+      items?: Array<Record<string, unknown>>;
+      total?: number;
+      page?: number;
+      pageSize?: number;
+    };
+    return {
+      rows: payload.items ?? [],
+      total: payload.total,
+      page: payload.page,
+      pageSize: payload.pageSize,
+    };
   }
 
   if (service === "microservice-wordpass" && dataset === "processes") {
-    const path = `/games/generate/processes?limit=${query.limit}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request)) as { tasks?: Array<Record<string, unknown>> };
-    return payload.tasks ?? [];
+    const params = new URLSearchParams({ limit: String(query.limit) });
+    if (query.status) {
+      params.set("status", query.status);
+    }
+    if (query.requestedBy) {
+      params.set("requestedBy", query.requestedBy);
+    }
+    const path = `/games/generate/processes?${params.toString()}`;
+    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as { tasks?: Array<Record<string, unknown>> };
+    return { rows: payload.tasks ?? [] };
   }
 
   throw new Error(`Dataset '${dataset}' not supported for ${service}`);
@@ -752,14 +1191,31 @@ export async function backofficeRoutes(
   const routingStore = new RoutingStateStore(config);
   await routingStore.load();
 
-  const refreshRoutingState = async (): Promise<void> => {
-    await routingStore.load();
-  };
-
   const runtimeMetrics = metrics ?? {
-    snapshot: () => ({ service: "bff-backoffice", note: "metrics disabled" }),
+    snapshot: () => ({
+      service: "bff-backoffice",
+      uptimeSeconds: 0,
+      traffic: {
+        requestsReceivedTotal: 0,
+        errorsTotal: 0,
+        inflightRequests: 0,
+        latencyCount: 0,
+        latencyAvgMs: 0,
+        requestBytesInTotal: 0,
+        responseBytesOutTotal: 0,
+      },
+      requestsByRoute: [],
+    }),
     recentLogs: () => [],
   };
+  const operationalSummaryBaseline: Record<string, { requestsTotal: number | null; fetchedAt: number }> = {};
+  const upstreamCache = new Map<string, CachedUpstreamResponse>();
+  const upstreamBreakers = new Map<string, CircuitBreaker>();
+  const operationalSummaryRequests = new Map<string, Promise<ServiceOperationalSummaryPayload>>();
+  const operationalSummaryTimeoutMs = Math.min(
+    config.UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS ?? 3000,
+    config.UPSTREAM_TIMEOUT_MS ?? 15000,
+  );
 
   app.get("/v1/backoffice/services", async (_request, reply) => {
     return reply.send({
@@ -768,8 +1224,118 @@ export async function backofficeRoutes(
     });
   });
 
+  app.get("/v1/backoffice/services/operational-summary", async (request, reply) => {
+    const runtimeKey = buildOperationalSummaryRuntimeKey(request);
+    const existingRequest = operationalSummaryRequests.get(runtimeKey);
+    if (existingRequest) {
+      return reply.send(await existingRequest);
+    }
+
+    const summaryRequest = (async (): Promise<ServiceOperationalSummaryPayload> => {
+      const now = Date.now();
+      const rows = await Promise.all(
+        SERVICE_CATALOG.map(async (service): Promise<ServiceOperationalRowPayload> => {
+          const startedAt = Date.now();
+
+          try {
+            const metricsPayload = await fetchMetricsSnapshot(
+              service.key,
+              config,
+              routingStore,
+              request,
+              runtimeMetrics,
+              upstreamCache,
+              upstreamBreakers,
+              operationalSummaryTimeoutMs,
+            );
+            const latencyMs = Math.max(0, Date.now() - startedAt);
+            const requestsTotal = toRequestsTotal(metricsPayload);
+            const conversion = toGenerationConversion(metricsPayload);
+            const previous = operationalSummaryBaseline[service.key];
+            let requestsPerSecond: number | null = null;
+
+            if (
+              previous &&
+              previous.requestsTotal !== null &&
+              requestsTotal !== null &&
+              now > previous.fetchedAt &&
+              requestsTotal >= previous.requestsTotal
+            ) {
+              const deltaRequests = requestsTotal - previous.requestsTotal;
+              const deltaSeconds = (now - previous.fetchedAt) / 1000;
+              if (deltaSeconds > 0) {
+                requestsPerSecond = Number((deltaRequests / deltaSeconds).toFixed(2));
+              }
+            }
+
+            operationalSummaryBaseline[service.key] = {
+              requestsTotal,
+              fetchedAt: now,
+            };
+
+            return {
+              key: service.key,
+              title: service.title,
+              domain: service.domain,
+              supportsData: service.supportsData,
+              online: true,
+              accessGuaranteed: true,
+              connectionError: false,
+              requestsTotal,
+              requestsPerSecond,
+              generationRequestedTotal: conversion.requestedTotal,
+              generationCreatedTotal: conversion.createdTotal,
+              generationConversionRatio: conversion.conversionRatio,
+              latencyMs,
+              lastUpdatedAt: new Date(now).toISOString(),
+              errorMessage: null,
+              lastKnownError: null,
+            };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Unknown error";
+            return {
+              key: service.key,
+              title: service.title,
+              domain: service.domain,
+              supportsData: service.supportsData,
+              online: false,
+              accessGuaranteed: !isAuthorizationError(message),
+              connectionError: isConnectionError(message),
+              requestsTotal: null,
+              requestsPerSecond: null,
+              generationRequestedTotal: null,
+              generationCreatedTotal: null,
+              generationConversionRatio: null,
+              latencyMs: Math.max(0, Date.now() - startedAt),
+              lastUpdatedAt: new Date(now).toISOString(),
+              errorMessage: message,
+              lastKnownError: null,
+            };
+          }
+        }),
+      );
+
+      return {
+        rows,
+        totals: {
+          total: rows.length,
+          onlineCount: rows.filter((row) => row.online).length,
+          accessIssues: rows.filter((row) => !row.accessGuaranteed).length,
+          connectionErrors: rows.filter((row) => row.connectionError).length,
+        },
+      };
+    })();
+
+    operationalSummaryRequests.set(runtimeKey, summaryRequest);
+
+    try {
+      return reply.send(await summaryRequest);
+    } finally {
+      operationalSummaryRequests.delete(runtimeKey);
+    }
+  });
+
   app.get("/v1/backoffice/service-targets", async (_request, reply) => {
-    await refreshRoutingState();
     const targets = getServiceRuntimeTargets(config, routingStore);
     return reply.send({
       total: targets.length,
@@ -778,7 +1344,6 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/service-targets/:service", async (request, reply) => {
-    await refreshRoutingState();
     const parsed = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
     if (!parsed.success) {
       return reply.status(400).send({ message: "Invalid configurable service" });
@@ -788,7 +1353,6 @@ export async function backofficeRoutes(
   });
 
   app.put("/v1/backoffice/service-targets/:service", async (request, reply) => {
-    await refreshRoutingState();
     const parsedService = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
     if (!parsedService.success) {
       return reply.status(400).send({ message: "Invalid configurable service" });
@@ -804,6 +1368,7 @@ export async function backofficeRoutes(
 
     try {
       await applyServiceRuntimeTarget(config, routingStore, parsedService.data, parsedPayload.data);
+      clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
       return reply.send(getServiceRuntimeTarget(config, routingStore, parsedService.data));
     } catch (error) {
       return reply.status(400).send({
@@ -813,28 +1378,44 @@ export async function backofficeRoutes(
   });
 
   app.delete("/v1/backoffice/service-targets/:service", async (request, reply) => {
-    await refreshRoutingState();
     const parsed = ConfigurableServiceTargetKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
     if (!parsed.success) {
       return reply.status(400).send({ message: "Invalid configurable service" });
     }
 
     await resetServiceRuntimeTarget(routingStore, parsed.data);
+    clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
     return reply.send(getServiceRuntimeTarget(config, routingStore, parsed.data));
   });
 
   app.get("/v1/backoffice/ai-engine/target", async (_request, reply) => {
-    await refreshRoutingState();
     return reply.send(getAiEngineRuntimeTarget(config, routingStore));
   });
 
   app.get("/v1/backoffice/ai-engine/presets", async (_request, reply) => {
-    await refreshRoutingState();
     return reply.send(getAiEnginePresetList(routingStore));
   });
 
+  app.post("/v1/backoffice/ai-engine/probe", async (request, reply) => {
+    const parsed = AiEngineTargetSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsed.error.flatten(),
+      });
+    }
+
+    try {
+      const result = await probeAiEngineTarget(config, parsed.data);
+      return reply.send(result);
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Invalid ai-engine target",
+      });
+    }
+  });
+
   app.post("/v1/backoffice/ai-engine/presets", async (request, reply) => {
-    await refreshRoutingState();
     const parsed = AiEnginePresetSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       return reply.status(400).send({
@@ -854,7 +1435,6 @@ export async function backofficeRoutes(
   });
 
   app.put("/v1/backoffice/ai-engine/presets/:presetId", async (request, reply) => {
-    await refreshRoutingState();
     const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
     if (!parsedParams.success) {
       return reply.status(400).send({ message: "Invalid preset id" });
@@ -884,7 +1464,6 @@ export async function backofficeRoutes(
   });
 
   app.delete("/v1/backoffice/ai-engine/presets/:presetId", async (request, reply) => {
-    await refreshRoutingState();
     const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
     if (!parsedParams.success) {
       return reply.status(400).send({ message: "Invalid preset id" });
@@ -899,7 +1478,6 @@ export async function backofficeRoutes(
   });
 
   app.put("/v1/backoffice/ai-engine/target", async (request, reply) => {
-    await refreshRoutingState();
     const parsed = AiEngineTargetSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       return reply.status(400).send({
@@ -911,6 +1489,7 @@ export async function backofficeRoutes(
     try {
       await syncGatewayAiEngineTarget(config, routingStore, "PUT", parsed.data as Record<string, unknown>);
       await applyAiEngineRuntimeTarget(config, routingStore, parsed.data);
+      clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
       return reply.send(getAiEngineRuntimeTarget(config, routingStore));
     } catch (error) {
       return reply.status(400).send({
@@ -920,10 +1499,10 @@ export async function backofficeRoutes(
   });
 
   app.delete("/v1/backoffice/ai-engine/target", async (_request, reply) => {
-    await refreshRoutingState();
     try {
       await syncGatewayAiEngineTarget(config, routingStore, "DELETE");
       await resetAiEngineRuntimeTarget(routingStore);
+      clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
       return reply.send(getAiEngineRuntimeTarget(config, routingStore));
     } catch (error) {
       return reply.status(400).send({
@@ -987,22 +1566,15 @@ export async function backofficeRoutes(
     }
 
     const service = parsed.data;
-
-    if (service === "bff-backoffice") {
-      return reply.send({ service, metrics: runtimeMetrics.snapshot() });
-    }
-
-    if (service === "ai-engine-stats") {
-      const payload = await fetchJsonFromService(service, config, routingStore, "/stats", request);
-      return reply.send({ service, metrics: payload });
-    }
-
-    if (service === "ai-engine-api") {
-      const payload = await fetchJsonFromService(service, config, routingStore, "/health", request);
-      return reply.send({ service, metrics: payload });
-    }
-
-    const payload = await fetchJsonFromService(service, config, routingStore, "/monitor/stats", request);
+    const payload = await fetchMetricsSnapshot(
+      service,
+      config,
+      routingStore,
+      request,
+      runtimeMetrics,
+      upstreamCache,
+      upstreamBreakers,
+    );
     return reply.send({ service, metrics: payload });
   });
 
@@ -1033,7 +1605,7 @@ export async function backofficeRoutes(
 
     if (service === "ai-engine-stats") {
       const path = `/stats/history?limit=${limit}`;
-      const payload = await fetchJsonFromService(service, config, routingStore, path, request);
+      const payload = await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
       return reply.send({ service, logs: payload });
     }
 
@@ -1047,7 +1619,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/monitor/logs?limit=${limit}`;
-    const payload = await fetchJsonFromService(service, config, routingStore, path, request);
+    const payload = await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
     return reply.send({ service, logs: payload });
   });
 
@@ -1074,8 +1646,32 @@ export async function backofficeRoutes(
       });
     }
 
-    const rows = await readDatasetRows(service, query.dataset, query, config, routingStore, request);
-    const paged = applyRowsQuery(rows, query);
+    const dataResult = await readDatasetRows(
+      service,
+      query.dataset,
+      query,
+      config,
+      routingStore,
+      request,
+      upstreamCache,
+      upstreamBreakers,
+    );
+    const canUseUpstreamPaging =
+      query.dataset === "history" &&
+      query.filter.trim().length === 0 &&
+      !query.sortBy &&
+      typeof dataResult.total === "number" &&
+      typeof dataResult.page === "number" &&
+      typeof dataResult.pageSize === "number";
+
+    const paged = canUseUpstreamPaging
+      ? {
+          total: dataResult.total as number,
+          page: dataResult.page as number,
+          pageSize: dataResult.pageSize as number,
+          rows: dataResult.rows,
+        }
+      : applyRowsQuery(dataResult.rows, query);
     return reply.send({
       service,
       dataset: query.dataset,
@@ -1102,7 +1698,7 @@ export async function backofficeRoutes(
       });
     }
 
-    const payload = await fetchJsonFromService(service, config, routingStore, "/catalogs", request);
+    const payload = await fetchJsonFromService(service, config, routingStore, "/catalogs", request, upstreamCache, upstreamBreakers);
     return reply.send({
       service,
       catalogs: payload,
@@ -1134,6 +1730,40 @@ export async function backofficeRoutes(
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, parsedPayload.data);
   });
 
+  app.patch("/v1/backoffice/services/:service/data/:entryId", async (request, reply) => {
+    const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
+    if (!parsedService.success) {
+      return reply.status(400).send({ message: "Invalid service" });
+    }
+
+    const parsedParams = EntryIdParamsSchema.safeParse(request.params ?? {});
+    if (!parsedParams.success) {
+      return reply.status(400).send({
+        message: "Invalid path parameters",
+        errors: parsedParams.error.flatten(),
+      });
+    }
+
+    const parsedPayload = DataUpdateSchema.safeParse(request.body ?? {});
+    if (!parsedPayload.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsedPayload.error.flatten(),
+      });
+    }
+
+    const service = parsedService.data;
+    if (!isEditableGameService(service)) {
+      return reply.status(400).send({
+        message: `Service '${service}' does not support manual data updates`,
+      });
+    }
+
+    const path = `/games/history/${encodeURIComponent(parsedParams.data.entryId)}`;
+    const url = buildUrl(serviceBaseUrl(config, routingStore, service), path, {});
+    await forwardRequest(request, reply, url, "PATCH", upstreamTimeoutMs, parsedPayload.data);
+  });
+
   app.post("/v1/backoffice/services/:service/generation/process", async (request, reply) => {
     const parsedService = ServiceKeySchema.safeParse((request.params as { service?: string } | undefined)?.service);
     if (!parsedService.success) {
@@ -1156,10 +1786,7 @@ export async function backofficeRoutes(
     }
 
     const url = buildUrl(serviceBaseUrl(config, routingStore, service), "/games/generate/process", {});
-    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, {
-      ...parsedPayload.data,
-      requestedBy: "backoffice",
-    });
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, normalizeGenerationProcessPayload(parsedPayload.data));
   });
 
   app.post("/v1/backoffice/services/:service/generation/wait", async (request, reply) => {
@@ -1184,10 +1811,7 @@ export async function backofficeRoutes(
     }
 
     const url = buildUrl(serviceBaseUrl(config, routingStore, service), "/games/generate/process/wait", {});
-    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, {
-      ...parsedPayload.data,
-      requestedBy: "backoffice",
-    });
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, normalizeGenerationProcessPayload(parsedPayload.data));
   });
 
   app.get("/v1/backoffice/services/:service/generation/processes", async (request, reply) => {
@@ -1221,7 +1845,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/generate/processes?${query.toString()}`;
-    const payload = await fetchJsonFromService(service, config, routingStore, path, request);
+    const payload = await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
     return reply.send(payload);
   });
 
@@ -1255,7 +1879,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/generate/process/${encodeURIComponent(parsedParams.data.taskId)}?includeItems=${parsedQuery.data.includeItems}`;
-    const payload = await fetchJsonFromService(service, config, routingStore, path, request);
+    const payload = await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
     return reply.send(payload);
   });
 
@@ -1299,7 +1923,15 @@ export async function backofficeRoutes(
 
   app.get("/v1/backoffice/ai-diagnostics/rag/stats", async (request, reply) => {
     try {
-      const payload = await fetchJsonFromService("ai-engine-api", config, routingStore, "/diagnostics/rag/stats", request);
+      const payload = await fetchJsonFromService(
+        "ai-engine-api",
+        config,
+        routingStore,
+        "/diagnostics/rag/stats",
+        request,
+        upstreamCache,
+        upstreamBreakers,
+      );
       return reply.send(payload);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -1319,7 +1951,15 @@ export async function backofficeRoutes(
 
   app.get("/v1/backoffice/ai-diagnostics/tests/status", async (request, reply) => {
     try {
-      const payload = await fetchJsonFromService("ai-engine-api", config, routingStore, "/diagnostics/tests/status", request);
+      const payload = await fetchJsonFromService(
+        "ai-engine-api",
+        config,
+        routingStore,
+        "/diagnostics/tests/status",
+        request,
+        upstreamCache,
+        upstreamBreakers,
+      );
       return reply.send(payload);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
