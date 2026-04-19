@@ -1172,7 +1172,7 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
-  it("persists routing overrides across BFF restarts", async () => {
+  it("does not persist ai-engine-api as a generic routing override across BFF restarts", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-routing-"));
     const stateFile = path.join(tempDir, "routing-state.json");
 
@@ -1223,9 +1223,9 @@ describe("backoffice routes", () => {
     expect(getResponse.statusCode).toBe(200);
     expect(getResponse.json()).toMatchObject({
       service: "ai-engine-api",
-      source: "override",
-      baseUrl: "http://192.168.1.80:17001",
-      label: "gpu workstation",
+      source: "env",
+      baseUrl: "http://ai-engine-api:7001",
+      label: null,
     });
 
     await appB.close();
@@ -1265,12 +1265,21 @@ describe("backoffice routes", () => {
   it("allows ai-engine target overrides outside the generic allowlist", async () => {
     const app = Fastify();
 
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ source: "override" }), {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      new Response(JSON.stringify({
+        source: "override",
+        label: null,
+        host: "example.com",
+        protocol: "http",
+        port: 17002,
+        llamaBaseUrl: "http://example.com:17002/v1/completions",
+        envLlamaBaseUrl: "http://llama-workstation.invalid:7002/v1/completions",
+        updatedAt: "2026-04-19T00:00:00.000Z",
+      }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
-    );
+    ));
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1280,6 +1289,7 @@ describe("backoffice routes", () => {
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       API_GATEWAY_URL: "http://api-gateway:7005",
+      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
       ALLOWED_ROUTING_TARGET_HOSTS: "localhost,127.0.0.1,192.168.0.0/16",
     }));
 
@@ -1288,8 +1298,7 @@ describe("backoffice routes", () => {
       url: "/v1/backoffice/ai-engine/target",
       payload: {
         host: "example.com",
-        apiPort: 17001,
-        statsPort: 17000,
+        port: 17002,
       },
     });
 
@@ -1297,18 +1306,16 @@ describe("backoffice routes", () => {
     expect(response.json()).toMatchObject({
       source: "override",
       host: "example.com",
-      apiBaseUrl: "http://example.com:17001",
-      statsBaseUrl: "http://example.com:17000",
+      llamaBaseUrl: "http://example.com:17002/v1/completions",
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://api-gateway:7005/internal/admin/ai-engine/target",
+      "http://ai-engine-api:7001/internal/admin/llama-target",
       expect.objectContaining({
         method: "PUT",
         body: JSON.stringify({
           host: "example.com",
           protocol: "http",
-          apiPort: 17001,
-          statsPort: 17000,
+          port: 17002,
         }),
       }),
     );
@@ -1341,7 +1348,7 @@ describe("backoffice routes", () => {
       total: 2,
       presets: expect.arrayContaining([
         expect.objectContaining({ id: "this-pc-lan", host: "192.168.0.14" }),
-        expect.objectContaining({ id: "stg-vps-relay", host: "195.35.48.40" }),
+        expect.objectContaining({ id: "workstation-public", host: "195.35.48.40" }),
       ]),
     });
 
@@ -1352,8 +1359,7 @@ describe("backoffice routes", () => {
         name: "Relay alternativo",
         host: "10.0.0.25",
         protocol: "http",
-        apiPort: 18001,
-        statsPort: 18000,
+        port: 18002,
       },
     });
 
@@ -1368,8 +1374,7 @@ describe("backoffice routes", () => {
         name: "Relay alternativo v2",
         host: "10.0.0.26",
         protocol: "https",
-        apiPort: 18443,
-        statsPort: 18444,
+        port: 18443,
       },
     });
 
@@ -1379,8 +1384,7 @@ describe("backoffice routes", () => {
       name: "Relay alternativo v2",
       host: "10.0.0.26",
       protocol: "https",
-      apiPort: 18443,
-      statsPort: 18444,
+      port: 18443,
     });
 
     await appA.close();
@@ -1430,24 +1434,9 @@ describe("backoffice routes", () => {
     const app = Fastify();
 
     const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "http://10.0.0.25:17001/health") {
+      if (url === "http://10.0.0.25:17002/v1/models") {
         return Promise.resolve(
           new Response(JSON.stringify({ status: "ready" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          }),
-        );
-      }
-
-      if (url === "http://10.0.0.25:17000/health") {
-        expect(options).toMatchObject({
-          headers: expect.objectContaining({
-            "x-api-key": "bridge-key-123",
-          }),
-        });
-
-        return Promise.resolve(
-          new Response(JSON.stringify({ status: "ok" }), {
             status: 200,
             headers: { "content-type": "application/json" },
           }),
@@ -1473,8 +1462,7 @@ describe("backoffice routes", () => {
       payload: {
         host: "10.0.0.25",
         protocol: "http",
-        apiPort: 17001,
-        statsPort: 17000,
+        port: 17002,
       },
     });
 
@@ -1482,15 +1470,10 @@ describe("backoffice routes", () => {
     expect(response.json()).toMatchObject({
       host: "10.0.0.25",
       reachable: true,
-      api: {
+      llama: {
         ok: true,
         status: 200,
-        url: "http://10.0.0.25:17001/health",
-      },
-      stats: {
-        ok: true,
-        status: 200,
-        url: "http://10.0.0.25:17000/health",
+        url: "http://10.0.0.25:17002/v1/models",
       },
     });
 
@@ -1540,10 +1523,19 @@ describe("backoffice routes", () => {
   it("allows overriding ai-engine target at runtime and proxies metrics to the override", async () => {
     const app = Fastify();
 
-    const fetchMock = vi.fn().mockImplementation((url: string) => {
-      if (url === "http://api-gateway:7005/internal/admin/ai-engine/target") {
+    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (url === "http://ai-engine-api:7001/internal/admin/llama-target") {
         return Promise.resolve(
-          new Response(JSON.stringify({ source: "override" }), {
+          new Response(JSON.stringify({
+            source: options?.method === "DELETE" ? "env" : "override",
+            label: options?.method === "DELETE" ? null : "workstation gpu",
+            host: options?.method === "DELETE" ? "llama-workstation.invalid" : "192.168.1.80",
+            protocol: "http",
+            port: options?.method === "DELETE" ? 7002 : 17002,
+            llamaBaseUrl: options?.method === "DELETE" ? "http://llama-workstation.invalid:7002/v1/completions" : "http://192.168.1.80:17002/v1/completions",
+            envLlamaBaseUrl: "http://llama-workstation.invalid:7002/v1/completions",
+            updatedAt: options?.method === "DELETE" ? null : "2026-04-19T00:00:00.000Z",
+          }), {
             status: 200,
             headers: { "content-type": "application/json" },
           }),
@@ -1579,8 +1571,7 @@ describe("backoffice routes", () => {
       payload: {
         host: "192.168.1.80",
         protocol: "http",
-        apiPort: 17001,
-        statsPort: 17000,
+        port: 17002,
         label: "workstation gpu",
       },
     });
@@ -1589,8 +1580,7 @@ describe("backoffice routes", () => {
     expect(overrideResponse.json()).toMatchObject({
       source: "override",
       host: "192.168.1.80",
-      apiBaseUrl: "http://192.168.1.80:17001",
-      statsBaseUrl: "http://192.168.1.80:17000",
+      llamaBaseUrl: "http://192.168.1.80:17002/v1/completions",
       label: "workstation gpu",
     });
 
@@ -1601,7 +1591,7 @@ describe("backoffice routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://192.168.1.80:17000/stats",
+      "http://ai-engine-stats:7000/stats",
       expect.objectContaining({
         headers: expect.objectContaining({
           "x-api-key": "bridge-key-123",
@@ -1609,7 +1599,7 @@ describe("backoffice routes", () => {
       }),
     );
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://api-gateway:7005/internal/admin/ai-engine/target",
+      "http://ai-engine-api:7001/internal/admin/llama-target",
       expect.objectContaining({
         method: "PUT",
       }),
@@ -1620,13 +1610,27 @@ describe("backoffice routes", () => {
 
   it("resets ai-engine target override back to env defaults", async () => {
     const app = Fastify();
+    let overrideActive = true;
 
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ status: "ok" }), {
+    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (options?.method === "DELETE") {
+        overrideActive = false;
+      }
+
+      return Promise.resolve(new Response(JSON.stringify({
+        source: overrideActive ? "override" : "env",
+        label: null,
+        host: overrideActive ? "10.0.0.12" : "llama-workstation.invalid",
+        protocol: "http",
+        port: 7002,
+        llamaBaseUrl: overrideActive ? "http://10.0.0.12:7002/v1/completions" : "http://llama-workstation.invalid:7002/v1/completions",
+        envLlamaBaseUrl: "http://llama-workstation.invalid:7002/v1/completions",
+        updatedAt: overrideActive ? "2026-04-19T00:00:00.000Z" : null,
+      }), {
         status: 200,
         headers: { "content-type": "application/json" },
-      }),
-    );
+      }));
+    });
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1655,11 +1659,11 @@ describe("backoffice routes", () => {
     expect(resetResponse.statusCode).toBe(200);
     expect(resetResponse.json()).toMatchObject({
       source: "env",
-      apiBaseUrl: "http://ai-engine-api:7001",
-      statsBaseUrl: "http://ai-engine-stats:7000",
+      llamaBaseUrl: "http://llama-workstation.invalid:7002/v1/completions",
+      envLlamaBaseUrl: "http://llama-workstation.invalid:7002/v1/completions",
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://api-gateway:7005/internal/admin/ai-engine/target",
+      "http://ai-engine-api:7001/internal/admin/llama-target",
       expect.objectContaining({
         method: "DELETE",
       }),
