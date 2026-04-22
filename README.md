@@ -27,6 +27,17 @@ flowchart LR
 - Persist shared runtime routing metadata required by operations.
 - Expose shared ai-engine preset management for all backoffice users.
 
+## Control-plane role
+
+`bff-backoffice` is more than a read-only BFF. It also acts as a narrow runtime control component for operator workflows.
+
+Concrete responsibilities beyond standard orchestration:
+
+- persist service-target overrides shared across operators
+- persist reusable ai-engine destination presets
+- synchronize ai-engine target changes toward `api-gateway`
+- expose effective target state back to the UI
+
 ## Repository structure
 
 - `src/`: Fastify + TypeScript implementation.
@@ -70,6 +81,16 @@ flowchart LR
 - This state is shared by all users connected to the same deployed BFF instance.
 - The BFF is therefore not just a read API; it is also a small runtime operations state holder.
 
+## Dependency model
+
+Primary downstream dependencies:
+
+- `microservice-users`
+- `microservice-quizz`
+- `microservice-wordpass`
+- `ai-engine-stats`
+- `api-gateway` administrative synchronization path
+
 ## CI/CD workflow behavior
 
 - `ci.yml`
@@ -106,6 +127,13 @@ Push to `main` triggers image rebuild in `platform-infra`, then automatic Kubern
 - `ALLOWED_ROUTING_TARGET_HOSTS` can restrict overrides to explicit hosts, wildcard suffixes like `*.amksandbox.cloud`, and IPv4 CIDR ranges such as `192.168.0.0/16`.
 - The dedicated ai-engine target route is exempt from that allowlist so backoffice admins can move ai-engine to any reachable host without redeploying the cluster.
 - `API_GATEWAY_ADMIN_TOKEN` is optional hardening for the internal gateway sync route; when set, the BFF sends it as a bearer token while propagating ai-engine target changes.
+
+## Failure boundaries
+
+- routing-state persistence failure
+- gateway synchronization failure that leaves local and effective targets diverged
+- downstream diagnostics failure while control routes remain available
+- allowlist misconfiguration that blocks intended retargeting
 
 ## Related documents
 
