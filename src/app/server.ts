@@ -14,15 +14,17 @@ import { backofficeRoutes } from "./routes/backoffice.js";
 import { healthRoutes } from "./routes/health.js";
 import { monitoringRoutes } from "./routes/monitoring.js";
 import { ServiceMetrics } from "./services/serviceMetrics.js";
+import { AuditTrailStore, classifyAdminAction, resolveActor } from "./services/auditTrailStore.js";
 
 configureHttpAgent();
 
 /** @module server — Fastify-based BFF-Backoffice server with CORS, metrics, and backoffice routes. */
 
-async function buildServer() {
+export async function buildServer() {
   const config = loadConfig();
   const app = Fastify({ logger: true });
   const metrics = new ServiceMetrics(config);
+  const auditTrail = new AuditTrailStore(config);
 
   const allowedOrigins = config.ALLOWED_ORIGINS.split(",").map((v) => v.trim());
   await app.register(cors, { origin: allowedOrigins });
@@ -83,12 +85,39 @@ async function buildServer() {
       error_code: reply.statusCode >= 500 ? "upstream_or_internal_error" : undefined,
     });
 
+    const classification = classifyAdminAction(request.method, route);
+    if (classification.audit) {
+      void auditTrail.record({
+        correlationId,
+        actor: resolveActor(request.headers),
+        ip: (request.ip ?? "unknown").toString(),
+        method: request.method,
+        route,
+        category: classification.category,
+        action: classification.action,
+        statusCode: reply.statusCode,
+        durationMs,
+        requestBytes: requestAny._requestBytes ?? 0,
+      });
+    }
+
     metrics.decrementInflight();
   });
 
   await healthRoutes(app);
   await monitoringRoutes(app, metrics);
   await backofficeRoutes(app, config, metrics);
+
+  app.get("/v1/backoffice/admin/audit", async (request, reply) => {
+    const limit = Math.min(2000, Math.max(1, Number((request.query as { limit?: string } | undefined)?.limit ?? 100)));
+    const events = await auditTrail.query(limit);
+    return reply.send({
+      enabled: auditTrail.isEnabled(),
+      retentionDays: config.AUDIT_TRAIL_RETENTION_DAYS ?? 90,
+      total: events.length,
+      events,
+    });
+  });
 
   app.setErrorHandler((error, _request, reply) => {
     if (isUpstreamTimeoutError(error)) {
@@ -120,7 +149,18 @@ async function main() {
   app.log.info({ service: config.SERVICE_NAME }, "BFF backoffice started");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+const isDirectRun = (() => {
+  try {
+    const entryUrl = new URL(`file://${process.argv[1] ?? ""}`).href;
+    return import.meta.url === entryUrl;
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
