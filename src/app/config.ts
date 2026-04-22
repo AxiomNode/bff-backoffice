@@ -25,6 +25,12 @@ const envSchema = z.object({
   METRICS_LOG_BUFFER_SIZE: z.coerce.number().int().min(50).max(5000).default(1000),
   BACKOFFICE_ROUTING_STATE_FILE: z.string().min(1).optional(),
   ALLOWED_ROUTING_TARGET_HOSTS: z.string().min(1).optional(),
+  AUDIT_TRAIL_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => (value === undefined ? true : value.toLowerCase() !== "false")),
+  AUDIT_TRAIL_DIR: z.string().min(1).optional(),
+  AUDIT_TRAIL_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
 });
 
 type ParsedConfig = z.infer<typeof envSchema>;
@@ -50,6 +56,9 @@ export type AppConfig = Omit<
   | "METRICS_LOG_BUFFER_SIZE"
   | "BACKOFFICE_ROUTING_STATE_FILE"
   | "ALLOWED_ROUTING_TARGET_HOSTS"
+  | "AUDIT_TRAIL_ENABLED"
+  | "AUDIT_TRAIL_DIR"
+  | "AUDIT_TRAIL_RETENTION_DAYS"
 > & {
   QUIZZ_SERVICE_URL?: string;
   WORDPASS_SERVICE_URL?: string;
@@ -69,6 +78,9 @@ export type AppConfig = Omit<
   METRICS_LOG_BUFFER_SIZE?: number;
   BACKOFFICE_ROUTING_STATE_FILE?: string;
   ALLOWED_ROUTING_TARGET_HOSTS?: string;
+  AUDIT_TRAIL_ENABLED?: boolean;
+  AUDIT_TRAIL_DIR?: string;
+  AUDIT_TRAIL_RETENTION_DAYS?: number;
 };
 
 /** Parses and validates environment variables into a typed config object. */
