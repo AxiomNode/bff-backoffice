@@ -1,5 +1,7 @@
 # bff-backoffice
 
+[![codecov](https://codecov.io/gh/AxiomNode/bff-backoffice/branch/main/graph/badge.svg)](https://codecov.io/gh/AxiomNode/bff-backoffice)
+
 Backend-for-Frontend service for AxiomNode backoffice operations.
 
 ## Architectural role

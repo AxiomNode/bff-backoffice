@@ -61,6 +61,13 @@ jobs:
         working-directory: bff-backoffice/src
       - run: npm run test:coverage
         working-directory: bff-backoffice/src
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: bff-backoffice/src/coverage/lcov.info
+          flags: bff-backoffice
+          fail_ci_if_error: false
       - run: npm run lint
         working-directory: bff-backoffice/src
       - run: npm audit --omit=dev --audit-level=high
