@@ -109,16 +109,18 @@ function normalizeState(raw: unknown): PersistedRoutingState {
         (parsed.protocol !== "http" && parsed.protocol !== "https") ||
         typeof parsed.updatedAt !== "string"
       ) {
-        if (candidate.version === 2 && typeof parsed.apiPort === "number") {
-          presets.push({
-            id: parsed.id,
-            name: parsed.name,
-            host: parsed.host,
-            protocol: parsed.protocol,
-            port: 7002,
-            updatedAt: parsed.updatedAt,
-          });
-        }
+        continue;
+      }
+
+      if (candidate.version === 2 && typeof parsed.apiPort === "number") {
+        presets.push({
+          id: parsed.id,
+          name: parsed.name,
+          host: parsed.host,
+          protocol: parsed.protocol,
+          port: parsed.apiPort,
+          updatedAt: parsed.updatedAt,
+        });
         continue;
       }
 
