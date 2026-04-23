@@ -27,9 +27,11 @@ import {
   getGenerationProcessesRequestOrReply,
   getGenerationStartRequestOrReply,
   getGenerationTaskRequestOrReply,
+  getGenerationWorkerStartRequestOrReply,
   getServiceKeyOrReply,
   type ConfigurableServiceTargetKey,
   type GenerationProcessStartPayload,
+  type GenerationWorkerStartPayload,
   type ServiceKey,
 } from "./backofficeRouteGuards.js";
 
@@ -86,6 +88,24 @@ function normalizeGenerationProcessPayload(
     ...(typeof itemCount === "number" ? { itemCount } : {}),
     count: payload.count,
     requestedBy: "backoffice",
+  };
+}
+
+function normalizeGenerationWorkerPayload(
+  payload: GenerationWorkerStartPayload,
+): {
+  countPerIteration: number;
+  categoryIds?: string[];
+  difficultyLevels?: Array<"easy" | "medium" | "hard">;
+} {
+  return {
+    countPerIteration: payload.countPerIteration,
+    ...(payload.categoryIds && payload.categoryIds.length > 0
+      ? { categoryIds: payload.categoryIds }
+      : {}),
+    ...(payload.difficultyLevels && payload.difficultyLevels.length > 0
+      ? { difficultyLevels: payload.difficultyLevels }
+      : {}),
   };
 }
 
@@ -1644,6 +1664,63 @@ export async function backofficeRoutes(
     const path = `/games/generate/process/${encodeURIComponent(requestData.taskId)}?includeItems=${requestData.includeItems}`;
     const payload = await fetchJsonFromService(requestData.service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
     return reply.send(payload);
+  });
+
+  app.get("/v1/backoffice/services/:service/generation/worker", async (request, reply) => {
+    const service = getEditableGameServiceOrReply(
+      reply,
+      (request.params as { service?: string } | undefined)?.service,
+      "runtime game generation",
+    );
+    if (!service) {
+      return;
+    }
+
+    const payload = await fetchJsonFromService(
+      service,
+      config,
+      routingStore,
+      "/games/generate/worker",
+      request,
+      upstreamCache,
+      upstreamBreakers,
+    );
+    return reply.send(payload);
+  });
+
+  app.post("/v1/backoffice/services/:service/generation/worker/start", async (request, reply) => {
+    const requestData = getGenerationWorkerStartRequestOrReply(reply, request.params, request.body);
+    if (!requestData) {
+      return;
+    }
+
+    const url = buildUrl(
+      serviceBaseUrl(config, routingStore, requestData.service),
+      "/games/generate/worker/start",
+      {},
+    );
+    await forwardRequest(
+      request,
+      reply,
+      url,
+      "POST",
+      upstreamTimeoutMs,
+      normalizeGenerationWorkerPayload(requestData.payload),
+    );
+  });
+
+  app.post("/v1/backoffice/services/:service/generation/worker/stop", async (request, reply) => {
+    const service = getEditableGameServiceOrReply(
+      reply,
+      (request.params as { service?: string } | undefined)?.service,
+      "runtime game generation",
+    );
+    if (!service) {
+      return;
+    }
+
+    const url = buildUrl(serviceBaseUrl(config, routingStore, service), "/games/generate/worker/stop", {});
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs);
   });
 
   app.delete("/v1/backoffice/services/:service/data/:entryId", async (request, reply) => {
