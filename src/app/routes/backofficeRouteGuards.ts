@@ -72,6 +72,14 @@ const GenerationProcessStartSchema = z.object({
   count: z.coerce.number().int().min(1).max(100).default(10),
 });
 
+const GenerationWorkerStartSchema = z.object({
+  countPerIteration: z.coerce.number().int().min(1).max(200).default(10),
+  categoryIds: z.array(z.string().min(1)).max(500).optional(),
+  difficultyLevels: z.array(z.enum(["easy", "medium", "hard"]))
+    .max(3)
+    .optional(),
+});
+
 const GenerationProcessesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(100),
   status: z.enum(["running", "completed", "failed"]).optional(),
@@ -81,6 +89,7 @@ const GenerationProcessesQuerySchema = z.object({
 export type DataMutationPayload = z.infer<typeof DataMutationSchema>;
 export type DataUpdatePayload = z.infer<typeof DataUpdateSchema>;
 export type GenerationProcessStartPayload = z.infer<typeof GenerationProcessStartSchema>;
+export type GenerationWorkerStartPayload = z.infer<typeof GenerationWorkerStartSchema>;
 export type GenerationProcessesPayload = z.infer<typeof GenerationProcessesQuerySchema>;
 
 export const ServiceKeySchema = z.enum([
@@ -285,6 +294,36 @@ export function getGenerationStartRequestOrReply(
     reply,
     (rawParams as { service?: string } | undefined)?.service,
     "game generation",
+  );
+  if (!service) {
+    return null;
+  }
+
+  return {
+    service,
+    payload: parsedPayload.data,
+  };
+}
+
+export function getGenerationWorkerStartRequestOrReply(
+  reply: FastifyReply,
+  rawParams: unknown,
+  rawBody: unknown,
+): { service: EditableGameService; payload: GenerationWorkerStartPayload } | null {
+  /* v8 ignore next -- helper callers always pass bodies; the nullish fallback is defensive only */
+  const parsedPayload = GenerationWorkerStartSchema.safeParse(rawBody ?? {});
+  if (!parsedPayload.success) {
+    reply.status(400).send({
+      message: "Invalid payload",
+      errors: parsedPayload.error.flatten(),
+    });
+    return null;
+  }
+
+  const service = getEditableGameServiceOrReply(
+    reply,
+    (rawParams as { service?: string } | undefined)?.service,
+    "runtime game generation",
   );
   if (!service) {
     return null;
