@@ -109,6 +109,94 @@ function normalizeGenerationWorkerPayload(
   };
 }
 
+function isMissingGenerationWorkerRoute(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("HTTP 404")
+    && message.includes("Route GET:/games/generate/worker not found")
+  );
+}
+
+function buildUnavailableGenerationWorkerResponse(service: ServiceKey): {
+  gameType: "quiz" | "word-pass";
+  worker: {
+    gameType: "quiz" | "word-pass";
+    active: boolean;
+    iterationInFlight: boolean;
+    intervalSeconds: number;
+    activatedAt: null;
+    lastIterationAt: null;
+    lastIterationDurationMs: null;
+    lastIterationCreated: null;
+    iterationsSinceActivation: number;
+    iterationsTotal: number;
+    generatedSinceActivation: number;
+    totalObjectsInDb: number;
+    lastError: string;
+    config: {
+      countPerIteration: number;
+      selectedCategoryIds: string[];
+      selectedDifficultyLevels: Array<"easy" | "medium" | "hard">;
+    };
+    available: {
+      categories: Array<{ id: string; name: string }>;
+      difficultyLevels: Array<{ id: "easy" | "medium" | "hard"; label: string; min: number; max: number }>;
+    };
+    balance: {
+      categories: Array<{ id: string; name: string; total: number; missingToMax: number }>;
+      difficulties: Array<{ id: "easy" | "medium" | "hard"; label: string; total: number; missingToMax: number }>;
+      mostMissingCategoryId: null;
+      mostMissingDifficultyLevel: null;
+    };
+  };
+} {
+  const gameType: "quiz" | "word-pass" = service === "microservice-wordpass" ? "word-pass" : "quiz";
+  const difficultyLevels: Array<{ id: "easy" | "medium" | "hard"; label: string; min: number; max: number }> = [
+    { id: "easy", label: "easy", min: 0, max: 33 },
+    { id: "medium", label: "medium", min: 34, max: 66 },
+    { id: "hard", label: "hard", min: 67, max: 100 },
+  ];
+
+  return {
+    gameType,
+    worker: {
+      gameType,
+      active: false,
+      iterationInFlight: false,
+      intervalSeconds: 60,
+      activatedAt: null,
+      lastIterationAt: null,
+      lastIterationDurationMs: null,
+      lastIterationCreated: null,
+      iterationsSinceActivation: 0,
+      iterationsTotal: 0,
+      generatedSinceActivation: 0,
+      totalObjectsInDb: 0,
+      lastError: "Runtime generation worker is unavailable on this service deployment.",
+      config: {
+        countPerIteration: 10,
+        selectedCategoryIds: [],
+        selectedDifficultyLevels: [],
+      },
+      available: {
+        categories: [],
+        difficultyLevels,
+      },
+      balance: {
+        categories: [],
+        difficulties: difficultyLevels.map((item) => ({
+          id: item.id,
+          label: item.label,
+          total: 0,
+          missingToMax: 0,
+        })),
+        mostMissingCategoryId: null,
+        mostMissingDifficultyLevel: null,
+      },
+    },
+  };
+}
+
 const AiEngineTargetSchema = z.object({
   host: z.string().trim().min(1).max(255),
   protocol: z.enum(["http", "https"]).default("http"),
@@ -1676,16 +1764,23 @@ export async function backofficeRoutes(
       return;
     }
 
-    const payload = await fetchJsonFromService(
-      service,
-      config,
-      routingStore,
-      "/games/generate/worker",
-      request,
-      upstreamCache,
-      upstreamBreakers,
-    );
-    return reply.send(payload);
+    try {
+      const payload = await fetchJsonFromService(
+        service,
+        config,
+        routingStore,
+        "/games/generate/worker",
+        request,
+        upstreamCache,
+        upstreamBreakers,
+      );
+      return reply.send(payload);
+    } catch (error) {
+      if (isMissingGenerationWorkerRoute(error)) {
+        return reply.send(buildUnavailableGenerationWorkerResponse(service));
+      }
+      throw error;
+    }
   });
 
   app.post("/v1/backoffice/services/:service/generation/worker/start", async (request, reply) => {

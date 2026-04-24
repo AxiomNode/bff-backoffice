@@ -1218,6 +1218,55 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("returns an inactive worker snapshot when generation worker endpoint is unavailable upstream", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          message: "Route GET:/games/generate/worker not found",
+          error: "Not Found",
+          statusCode: 404,
+        }),
+        {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-quiz/generation/worker",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      gameType: "quiz",
+      worker: {
+        gameType: "quiz",
+        active: false,
+        iterationInFlight: false,
+        lastError: "Runtime generation worker is unavailable on this service deployment.",
+      },
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://microservice-quizz:7100/games/generate/worker");
+
+    await app.close();
+  });
+
   it("rejects generation process detail for services that do not support game generation", async () => {
     const app = Fastify();
 
