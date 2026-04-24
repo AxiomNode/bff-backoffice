@@ -1759,7 +1759,26 @@ export async function backofficeRoutes(
   app.post("/v1/backoffice/ai-diagnostics/tests/run", async (request, reply) => {
     try {
       const url = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/diagnostics/tests/run", {});
-      await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs);
+      const normalizedHeaders = normalizeAuthHeaders(request);
+      const requestHeaders: Record<string, string | undefined> = {
+        ...normalizedHeaders,
+      };
+      const serviceApiKey = resolveServiceApiKey(config, "ai-engine-api");
+      if (serviceApiKey) {
+        requestHeaders["x-api-key"] = serviceApiKey;
+      }
+
+      const result = await forwardHttp({
+        targetUrl: url,
+        method: "POST",
+        requestHeaders,
+        body: request.body ?? {},
+        timeoutMs: upstreamTimeoutMs,
+      });
+
+      reply.code(result.status);
+      reply.header("content-type", result.contentType);
+      reply.send(result.payload);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return reply.status(502).send({ message: `ai-engine-api unreachable: ${message}` });

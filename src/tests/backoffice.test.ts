@@ -1619,6 +1619,7 @@ describe("backoffice routes", () => {
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
+      AI_ENGINE_API_KEY: "engine-key",
     }));
 
     const runResponse = await app.inject({
@@ -1645,7 +1646,14 @@ describe("backoffice routes", () => {
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://ai-engine-api:7001/diagnostics/tests/run");
-    expect(fetchMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ method: "POST" }));
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: expect.objectContaining({
+        authorization: "Bearer staff-token",
+        "x-api-key": "engine-key",
+      }),
+    }));
     expect(fetchMock.mock.calls[1]?.[0]).toBe("http://ai-engine-api:7001/diagnostics/tests/status");
     expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ headers: expect.any(Object) }));
 
