@@ -914,7 +914,7 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
-  it("wraps non-json upstream payloads and derives authorization from firebase id token", async () => {
+  it("wraps non-json upstream payloads without deriving authorization for non-users services", async () => {
     const app = Fastify();
 
     const fetchMock = vi.fn().mockResolvedValue(
@@ -948,11 +948,11 @@ describe("backoffice routes", () => {
     expect(fetchMock.mock.calls[0]?.[1]).toEqual(
       expect.objectContaining({
         headers: expect.objectContaining({
-          authorization: "Bearer firebase-only-token",
           "x-firebase-id-token": "firebase-only-token",
         }),
       }),
     );
+    expect((fetchMock.mock.calls[0]?.[1] as { headers?: Record<string, string> } | undefined)?.headers).not.toHaveProperty("authorization");
 
     await app.close();
   });
@@ -2586,13 +2586,13 @@ describe("backoffice routes", () => {
       "http://ai-engine-stats:7000/stats",
       expect.objectContaining({
         headers: expect.objectContaining({
-          authorization: "Bearer firebase-staff-token",
           "x-firebase-id-token": "firebase-staff-token",
           "x-correlation-id": "corr-bo-1",
           "x-api-key": "bridge-key-123",
         }),
       }),
     );
+    expect((fetchMock.mock.calls[0]?.[1] as { headers?: Record<string, string> } | undefined)?.headers).not.toHaveProperty("authorization");
 
     await app.close();
   });
