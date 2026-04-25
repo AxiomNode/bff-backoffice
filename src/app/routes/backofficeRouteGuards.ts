@@ -1,4 +1,5 @@
 import type { FastifyReply } from "fastify";
+import { GenerationProcessQuerySchema } from "@axiomnode/shared-sdk-client";
 import { z } from "zod";
 
 export type ServiceKey =
@@ -54,10 +55,6 @@ const EntryIdParamsSchema = z.object({
 
 const GenerationTaskParamsSchema = z.object({
   taskId: z.string().uuid(),
-});
-
-const GenerationTaskQuerySchema = z.object({
-  includeItems: z.coerce.boolean().default(false),
 });
 
 const GenerationProcessStartSchema = z.object({
@@ -183,7 +180,14 @@ export function getGenerationTaskRequestOrReply(
   }
 
   /* v8 ignore next -- helper callers always pass query objects; the nullish fallback is defensive only */
-  const parsedQuery = GenerationTaskQuerySchema.parse(rawQuery ?? {});
+  const parsedQuery = GenerationProcessQuerySchema.safeParse(rawQuery ?? {});
+  if (!parsedQuery.success) {
+    reply.status(400).send({
+      message: "Invalid query parameters",
+      errors: parsedQuery.error.flatten(),
+    });
+    return null;
+  }
 
   const service = getEditableGameServiceOrReply(
     reply,
@@ -197,7 +201,7 @@ export function getGenerationTaskRequestOrReply(
   return {
     service,
     taskId: parsedParams.data.taskId,
-    includeItems: parsedQuery.includeItems,
+    includeItems: parsedQuery.data.includeItems,
   };
 }
 

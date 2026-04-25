@@ -127,15 +127,31 @@ describe("backofficeRouteGuards", () => {
       method: "GET",
       url: "/generation/microservice-quiz/not-a-uuid?includeItems=false",
     });
-    const valid = await app.inject({
+    const invalidQuery = await app.inject({
       method: "GET",
       url: "/generation/microservice-quiz/550e8400-e29b-41d4-a716-446655440000?includeItems=bad-bool",
+    });
+    const validFalse = await app.inject({
+      method: "GET",
+      url: "/generation/microservice-quiz/550e8400-e29b-41d4-a716-446655440000?includeItems=false",
+    });
+    const validTrue = await app.inject({
+      method: "GET",
+      url: "/generation/microservice-quiz/550e8400-e29b-41d4-a716-446655440000?includeItems=true",
     });
 
     expect(invalidParams.statusCode).toBe(400);
     expect(invalidParams.json()).toMatchObject({ message: "Invalid path parameters" });
-    expect(valid.statusCode).toBe(200);
-    expect(valid.json()).toEqual({
+    expect(invalidQuery.statusCode).toBe(400);
+    expect(invalidQuery.json()).toMatchObject({ message: "Invalid query parameters" });
+    expect(validFalse.statusCode).toBe(200);
+    expect(validFalse.json()).toEqual({
+      service: "microservice-quiz",
+      taskId: "550e8400-e29b-41d4-a716-446655440000",
+      includeItems: false,
+    });
+    expect(validTrue.statusCode).toBe(200);
+    expect(validTrue.json()).toEqual({
       service: "microservice-quiz",
       taskId: "550e8400-e29b-41d4-a716-446655440000",
       includeItems: true,
