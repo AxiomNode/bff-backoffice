@@ -225,7 +225,6 @@ describe("backofficeRouteGuards", () => {
       payload: {
         dataset: "history",
         categoryId: "11",
-        language: "es",
         difficultyPercentage: 55,
         content: { question: "Q" },
       },
@@ -255,7 +254,6 @@ describe("backofficeRouteGuards", () => {
       payload: {
         dataset: "history",
         categoryId: "11",
-        language: "es",
         difficultyPercentage: 55,
         content: { question: "Q" },
         status: "manual",
@@ -309,7 +307,6 @@ describe("backofficeRouteGuards", () => {
       url: "/generation-start/microservice-wordpass",
       payload: {
         categoryId: "11",
-        language: "es",
         numQuestions: 6,
       },
     });
@@ -322,7 +319,7 @@ describe("backofficeRouteGuards", () => {
       url: "/generation-start/microservice-users",
       payload: {
         categoryId: "11",
-        language: "es",
+        numQuestions: 6,
       },
     });
     const unsupportedProcesses = await app.inject({
@@ -341,7 +338,6 @@ describe("backofficeRouteGuards", () => {
       service: "microservice-wordpass",
       payload: {
         categoryId: "11",
-        language: "es",
         numQuestions: 6,
         count: 10,
       },

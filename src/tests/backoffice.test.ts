@@ -131,7 +131,6 @@ describe("backoffice routes", () => {
       payload: {
         dataset: "history",
         categoryId: "9",
-        language: "es",
         difficultyPercentage: 60,
         content: { question: "Q" },
       },
@@ -546,7 +545,6 @@ describe("backoffice routes", () => {
       },
       payload: {
         categoryId: "11",
-        language: "es",
         difficultyPercentage: 55,
         itemCount: 4,
         count: 8,
@@ -560,7 +558,6 @@ describe("backoffice routes", () => {
         method: "POST",
         body: JSON.stringify({
           categoryId: "11",
-          language: "es",
           difficultyPercentage: 55,
           itemCount: 4,
           count: 8,
@@ -1230,7 +1227,6 @@ describe("backoffice routes", () => {
       headers: { authorization: "Bearer staff-token" },
       payload: {
         categoryId: "11",
-        language: "es",
         numQuestions: 6,
         count: 3,
       },
@@ -1256,7 +1252,6 @@ describe("backoffice routes", () => {
         method: "POST",
         body: JSON.stringify({
           categoryId: "11",
-          language: "es",
           itemCount: 6,
           count: 3,
           requestedBy: "backoffice",
@@ -1407,7 +1402,6 @@ describe("backoffice routes", () => {
       payload: {
         dataset: "history",
         categoryId: "9",
-        language: "es",
         difficultyPercentage: 20,
         content: { question: "Q" },
       },
@@ -1417,7 +1411,7 @@ describe("backoffice routes", () => {
       url: "/v1/backoffice/services/microservice-users/generation/process",
       payload: {
         categoryId: "9",
-        language: "es",
+        numQuestions: 4,
       },
     });
     const deleteResponse = await app.inject({
@@ -1464,7 +1458,7 @@ describe("backoffice routes", () => {
       url: "/v1/backoffice/services/microservice-users/generation/wait",
       payload: {
         categoryId: "11",
-        language: "es",
+        numQuestions: 4,
       },
     });
 
@@ -1618,7 +1612,7 @@ describe("backoffice routes", () => {
     const invalidGenerationWait = await app.inject({
       method: "POST",
       url: "/v1/backoffice/services/not-real/generation/wait",
-      payload: { categoryId: "9", language: "es" },
+      payload: { categoryId: "9", numQuestions: 4 },
     });
     const invalidGenerationProcesses = await app.inject({
       method: "GET",

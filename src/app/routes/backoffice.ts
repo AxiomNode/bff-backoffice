@@ -84,7 +84,6 @@ function normalizeGenerationProcessPayload(
   payload: GenerationProcessStartPayload,
 ): {
   categoryId: string;
-  language: string;
   difficultyPercentage?: number;
   itemCount?: number;
   count: number;
@@ -93,7 +92,6 @@ function normalizeGenerationProcessPayload(
   const itemCount = payload.itemCount ?? payload.numQuestions;
   return {
     categoryId: payload.categoryId,
-    language: payload.language,
     ...(typeof payload.difficultyPercentage === "number"
       ? { difficultyPercentage: payload.difficultyPercentage }
       : {}),
