@@ -315,7 +315,7 @@ describe("backoffice routes", () => {
     const app = Fastify();
 
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ categories: [], languages: [] }), {
+      new Response(JSON.stringify({ categories: [] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
@@ -356,7 +356,7 @@ describe("backoffice routes", () => {
     const app = Fastify();
 
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ categories: [{ id: "w1" }], languages: ["es", "en"] }), {
+      new Response(JSON.stringify({ categories: [{ id: "w1" }] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
@@ -383,7 +383,7 @@ describe("backoffice routes", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       service: "microservice-wordpass",
-      catalogs: { categories: [{ id: "w1" }], languages: ["es", "en"] },
+      catalogs: { categories: [{ id: "w1" }] },
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://microservice-wordpass:7101/catalogs");
 
@@ -394,7 +394,7 @@ describe("backoffice routes", () => {
     const app = Fastify();
 
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ categories: [{ id: "9" }], languages: ["es"] }), {
+      new Response(JSON.stringify({ categories: [{ id: "9" }] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
@@ -642,14 +642,71 @@ describe("backoffice routes", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/v1/backoffice/services/microservice-quiz/data?dataset=history&categoryId=11&language=es&difficultyPercentage=55&status=completed&limit=100",
+      url: "/v1/backoffice/services/microservice-quiz/data?dataset=history&categoryId=11&difficultyPercentage=55&status=completed&limit=100",
       headers: { authorization: "Bearer staff-token" },
     });
 
     expect(response.statusCode).toBe(200);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://microservice-quizz:7100/games/history?limit=100&page=1&pageSize=20&categoryId=11&language=es&difficultyPercentage=55&status=completed",
+      "http://microservice-quizz:7100/games/history?limit=100&page=1&pageSize=20&categoryId=11&difficultyPercentage=55&status=completed",
     );
+
+    await app.close();
+  });
+
+  it("returns category insights for quiz history dataset", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        items: [
+          { id: "q-1", categoryId: "10", categoryName: "History" },
+          { id: "q-2", categoryId: "10", categoryName: "History" },
+          { id: "q-3", categoryId: "10", categoryName: "History" },
+          { id: "q-4", categoryId: "20", categoryName: "Science" },
+          { id: "q-5", categoryId: "30", categoryName: "Art" },
+        ],
+        total: 5,
+        page: 1,
+        pageSize: 20,
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-quiz/data?dataset=history&limit=100",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      service: "microservice-quiz",
+      dataset: "history",
+      insights: {
+        sampleSize: 5,
+        categories: [
+          { id: "10", name: "History", count: 3, percentage: 60 },
+          { id: "30", name: "Art", count: 1, percentage: 20 },
+          { id: "20", name: "Science", count: 1, percentage: 20 },
+        ],
+        deficitCategories: [
+          { id: "20", name: "Science", count: 1, percentage: 20 },
+        ],
+      },
+    });
 
     await app.close();
   });
@@ -754,13 +811,13 @@ describe("backoffice routes", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/v1/backoffice/services/microservice-wordpass/data?dataset=history&categoryId=12&language=es&difficultyPercentage=70&status=completed&limit=250",
+      url: "/v1/backoffice/services/microservice-wordpass/data?dataset=history&categoryId=12&difficultyPercentage=70&status=completed&limit=250",
       headers: { authorization: "Bearer staff-token" },
     });
 
     expect(response.statusCode).toBe(200);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://microservice-wordpass:7101/games/history?limit=250&page=1&pageSize=20&categoryId=12&language=es&difficultyPercentage=70&status=completed",
+      "http://microservice-wordpass:7101/games/history?limit=250&page=1&pageSize=20&categoryId=12&difficultyPercentage=70&status=completed",
     );
 
     await app.close();
