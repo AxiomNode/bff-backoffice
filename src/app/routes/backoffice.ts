@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
-import { LeaderboardQuerySchema } from "@axiomnode/shared-sdk-client/contracts";
+import { LeaderboardQuerySchema } from "@axiomnode/shared-sdk-client";
 import {
   CircuitBreaker,
   UpstreamTimeoutError,
@@ -43,6 +43,19 @@ type DataQueryDataset =
   | "history"
   | "processes";
 
+type HistoryCategoryInsight = {
+  id: string;
+  name: string;
+  count: number;
+  percentage: number;
+};
+
+type HistoryDatasetInsights = {
+  sampleSize: number;
+  categories: HistoryCategoryInsight[];
+  deficitCategories: HistoryCategoryInsight[];
+};
+
 const ServiceTargetOverrideSchema = z.object({
   baseUrl: z.string().trim().url(),
   label: z.string().trim().max(80).optional(),
@@ -58,7 +71,6 @@ const DataQuerySchema = z.object({
   metric: z.enum(["won", "score", "played"]).default("won"),
   status: z.enum(["running", "completed", "failed"]).optional(),
   requestedBy: z.enum(["api", "backoffice"]).optional(),
-  language: z.string().min(2).max(5).optional(),
   categoryId: z.string().min(1).optional(),
   difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
   limit: z.coerce.number().int().min(1).max(1000).default(500),
@@ -848,6 +860,86 @@ function applyRowsQuery(
   };
 }
 
+function pickString(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return "";
+}
+
+function toPercentage(count: number, total: number): number {
+  if (total <= 0) {
+    return 0;
+  }
+  return Number(((count / total) * 100).toFixed(1));
+}
+
+function pickDeficitEntries<T extends { count: number; percentage: number }>(entries: T[]): T[] {
+  if (entries.length <= 1) {
+    return [];
+  }
+
+  const averageShare = 100 / entries.length;
+  const threshold = Math.min(20, averageShare * 0.75);
+  const deficits = entries.filter((entry) => entry.percentage < threshold);
+
+  if (deficits.length > 0) {
+    return deficits.slice(0, 3);
+  }
+
+  return [entries[entries.length - 1]].filter(Boolean) as T[];
+}
+
+function buildHistoryDatasetInsights(rows: Row[]): HistoryDatasetInsights | null {
+  const sampleSize = rows.length;
+  if (sampleSize === 0) {
+    return null;
+  }
+
+  const categoryBuckets = new Map<string, { id: string; name: string; count: number }>();
+
+  for (const row of rows) {
+    const categoryId = pickString(row.categoryId) || "unknown";
+    const categoryName = pickString(row.categoryName) || categoryId;
+    const categoryKey = categoryId.toLowerCase();
+    const currentCategory = categoryBuckets.get(categoryKey);
+
+    if (currentCategory) {
+      currentCategory.count += 1;
+      if (!currentCategory.name || currentCategory.name === currentCategory.id) {
+        currentCategory.name = categoryName;
+      }
+    } else {
+      categoryBuckets.set(categoryKey, {
+        id: categoryId,
+        name: categoryName,
+        count: 1,
+      });
+    }
+  }
+
+  const categories = [...categoryBuckets.values()]
+    .map((entry) => ({
+      ...entry,
+      percentage: toPercentage(entry.count, sampleSize),
+    }))
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+      return left.name.localeCompare(right.name, "es", { sensitivity: "base" });
+    });
+
+  return {
+    sampleSize,
+    categories,
+    deficitCategories: pickDeficitEntries(categories),
+  };
+}
+
 function serviceBaseUrl(config: AppConfig, routingStore: RoutingStateStore, service: ServiceKey): string {
   if (CONFIGURABLE_SERVICE_TARGET_KEYS.includes(service as ConfigurableServiceTargetKey)) {
     return getServiceRuntimeTarget(config, routingStore, service as ConfigurableServiceTargetKey).baseUrl;
@@ -1054,9 +1146,6 @@ async function readDatasetRows(
     if (query.categoryId) {
       params.set("categoryId", query.categoryId);
     }
-    if (query.language) {
-      params.set("language", query.language);
-    }
     if (typeof query.difficultyPercentage === "number") {
       params.set("difficultyPercentage", String(query.difficultyPercentage));
     }
@@ -1099,9 +1188,6 @@ async function readDatasetRows(
     });
     if (query.categoryId) {
       params.set("categoryId", query.categoryId);
-    }
-    if (query.language) {
-      params.set("language", query.language);
     }
     if (typeof query.difficultyPercentage === "number") {
       params.set("difficultyPercentage", String(query.difficultyPercentage));
@@ -1652,6 +1738,11 @@ export async function backofficeRoutes(
           rows: dataResult.rows,
         }
       : applyRowsQuery(dataResult.rows, query);
+    const insights =
+      query.dataset === "history" &&
+      (service === "microservice-quiz" || service === "microservice-wordpass")
+        ? buildHistoryDatasetInsights(dataResult.rows)
+        : null;
     return reply.send({
       service,
       dataset: query.dataset,
@@ -1662,6 +1753,7 @@ export async function backofficeRoutes(
       page: paged.page,
       pageSize: paged.pageSize,
       rows: paged.rows,
+      insights,
     });
   });
 
