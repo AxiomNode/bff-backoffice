@@ -465,7 +465,7 @@ function clearUpstreamRuntimeState(
 }
 
 function buildOperationalSummaryRuntimeKey(request: FastifyRequest): string {
-  const headers = normalizeAuthHeaders(request);
+  const headers = normalizeForwardHeaders(request);
   const summaryHeaders: Record<string, string> = {};
 
   if (headers.authorization) {
@@ -753,12 +753,17 @@ async function syncAiEngineLlamaTarget(
   return response.json() as Promise<Record<string, unknown>>;
 }
 
-function normalizeAuthHeaders(request: FastifyRequest): Record<string, string | undefined> {
+function normalizeForwardHeaders(
+  request: FastifyRequest,
+  options?: { deriveAuthorizationFromFirebaseIdToken?: boolean },
+): Record<string, string | undefined> {
   const idTokenHeader = request.headers["x-firebase-id-token"];
   return {
     ...(request.headers as Record<string, string | undefined>),
     authorization:
-      typeof idTokenHeader === "string" && idTokenHeader.length > 0
+      options?.deriveAuthorizationFromFirebaseIdToken === true &&
+      typeof idTokenHeader === "string" &&
+      idTokenHeader.length > 0
         ? `Bearer ${idTokenHeader}`
         : request.headers.authorization,
   };
@@ -973,7 +978,9 @@ async function fetchJsonFromService(
   upstreamBreakers: Map<string, CircuitBreaker>,
   timeoutOverrideMs?: number,
 ): Promise<unknown> {
-  const headers = normalizeAuthHeaders(request);
+  const headers = normalizeForwardHeaders(request, {
+    deriveAuthorizationFromFirebaseIdToken: service === "microservice-users",
+  });
   const target = buildUrl(serviceBaseUrl(config, routingStore, service), path, {});
   const outgoingHeaders: Record<string, string> = {};
   if (headers.authorization) {
@@ -1081,8 +1088,9 @@ async function forwardRequest(
   method: "GET" | "POST" | "PATCH" | "DELETE",
   timeoutMs: number,
   body?: unknown,
+  options?: { deriveAuthorizationFromFirebaseIdToken?: boolean },
 ): Promise<void> {
-  const normalizedHeaders = normalizeAuthHeaders(request);
+  const normalizedHeaders = normalizeForwardHeaders(request, options);
 
   const result = await forwardHttp({
     targetUrl,
@@ -1577,12 +1585,16 @@ export async function backofficeRoutes(
 
   app.post("/v1/backoffice/auth/session", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/firebase/session", {});
-    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, request.body);
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, request.body, {
+      deriveAuthorizationFromFirebaseIdToken: true,
+    });
   });
 
   app.get("/v1/backoffice/auth/me", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/me/profile", {});
-    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
+    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs, undefined, {
+      deriveAuthorizationFromFirebaseIdToken: true,
+    });
   });
 
   app.get("/v1/backoffice/users/leaderboard", async (request, reply) => {
@@ -1596,22 +1608,30 @@ export async function backofficeRoutes(
     }
 
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/leaderboard", query.data);
-    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
+    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs, undefined, {
+      deriveAuthorizationFromFirebaseIdToken: true,
+    });
   });
 
   app.get("/v1/backoffice/monitor/stats", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/monitor/stats", request.query as Record<string, unknown>);
-    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
+    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs, undefined, {
+      deriveAuthorizationFromFirebaseIdToken: true,
+    });
   });
 
   app.post("/v1/backoffice/users/events/manual", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/me/games/events", {});
-    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, request.body);
+    await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, request.body, {
+      deriveAuthorizationFromFirebaseIdToken: true,
+    });
   });
 
   app.get("/v1/backoffice/admin/users/roles", async (request, reply) => {
     const url = buildUrl(config.USERS_SERVICE_URL, "/users/admin/roles", {});
-    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs);
+    await forwardRequest(request, reply, url, "GET", upstreamTimeoutMs, undefined, {
+      deriveAuthorizationFromFirebaseIdToken: true,
+    });
   });
 
   app.patch("/v1/backoffice/admin/users/roles/:firebaseUid", async (request, reply) => {
@@ -1621,7 +1641,9 @@ export async function backofficeRoutes(
       `/users/admin/roles/${encodeURIComponent(params.firebaseUid)}`,
       {},
     );
-    await forwardRequest(request, reply, url, "PATCH", upstreamTimeoutMs, request.body);
+    await forwardRequest(request, reply, url, "PATCH", upstreamTimeoutMs, request.body, {
+      deriveAuthorizationFromFirebaseIdToken: true,
+    });
   });
 
   app.get("/v1/backoffice/services/:service/metrics", async (request, reply) => {
@@ -1944,7 +1966,7 @@ export async function backofficeRoutes(
   app.post("/v1/backoffice/ai-diagnostics/tests/run", async (request, reply) => {
     try {
       const url = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/diagnostics/tests/run", {});
-      const normalizedHeaders = normalizeAuthHeaders(request);
+      const normalizedHeaders = normalizeForwardHeaders(request);
       const requestHeaders: Record<string, string | undefined> = {
         ...normalizedHeaders,
       };
