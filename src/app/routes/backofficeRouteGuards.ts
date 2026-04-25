@@ -29,7 +29,6 @@ const DataDeleteQuerySchema = z.object({
 const DataMutationSchema = z.object({
   dataset: z.literal("history"),
   categoryId: z.string().min(1),
-  language: z.string().min(2).max(5),
   difficultyPercentage: z.coerce.number().int().min(0).max(100),
   content: z.record(z.unknown()).refine((value) => Object.keys(value).length > 0, {
     message: "content must include at least one field",
@@ -40,7 +39,6 @@ const DataMutationSchema = z.object({
 const DataUpdateSchema = z.object({
   dataset: z.literal("history"),
   categoryId: z.string().min(1).optional(),
-  language: z.string().min(2).max(5).optional(),
   difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
   content: z.record(z.unknown()).refine((value) => Object.keys(value).length > 0, {
     message: "content must include at least one field",
@@ -64,7 +62,6 @@ const GenerationTaskQuerySchema = z.object({
 
 const GenerationProcessStartSchema = z.object({
   categoryId: z.string().min(1),
-  language: z.string().min(2).max(5),
   difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
   itemCount: z.coerce.number().int().min(1).max(50).optional(),
   numQuestions: z.coerce.number().int().min(1).max(50).optional(),
