@@ -52,4 +52,23 @@ describe("loadConfig", () => {
 
     expect(() => loadConfig()).toThrow();
   });
+
+  it("parses optional kubernetes flags and release metadata overrides", () => {
+    for (const [key, value] of Object.entries(REQUIRED_ENV)) {
+      vi.stubEnv(key, value);
+    }
+    vi.stubEnv("KUBERNETES_OBSERVABILITY_ENABLED", "false");
+    vi.stubEnv("KUBERNETES_REQUEST_TIMEOUT_MS", "8000");
+    vi.stubEnv("RELEASE_ENV", "stg");
+    vi.stubEnv("RELEASE_VERSION", "abc1234");
+    vi.stubEnv("RELEASE_DEPLOYED_AT", "2026-04-26 20:10 UTC");
+
+    const config = loadConfig();
+
+    expect(config.KUBERNETES_OBSERVABILITY_ENABLED).toBe(false);
+    expect(config.KUBERNETES_REQUEST_TIMEOUT_MS).toBe(8000);
+    expect(config.RELEASE_ENV).toBe("stg");
+    expect(config.RELEASE_VERSION).toBe("abc1234");
+    expect(config.RELEASE_DEPLOYED_AT).toBe("2026-04-26 20:10 UTC");
+  });
 });

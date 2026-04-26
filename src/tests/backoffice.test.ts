@@ -145,6 +145,60 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("surfaces kubernetes overview upstream failures", async () => {
+    const app = Fastify();
+
+    fetchKubernetesOverviewMock.mockRejectedValue(new Error("metrics api unavailable"));
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/kubernetes/overview",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      message: "Failed to load Kubernetes overview",
+      error: "metrics api unavailable",
+    });
+
+    await app.close();
+  });
+
+  it("falls back to a generic message when kubernetes overview rejects with a non-error value", async () => {
+    const app = Fastify();
+
+    fetchKubernetesOverviewMock.mockRejectedValue("boom");
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/kubernetes/overview",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      message: "Failed to load Kubernetes overview",
+      error: "Unknown error",
+    });
+
+    await app.close();
+  });
+
   it("persists and returns deployment history entries", async () => {
     const app = Fastify();
     const historyFile = path.join(tempStateDir, "deployment-history.json");
@@ -196,6 +250,105 @@ describe("backoffice routes", () => {
         expect.objectContaining({ version: "abc1234" }),
       ]),
     });
+
+    await app.close();
+  });
+
+  it("returns an empty deployment history snapshot when no release metadata exists", async () => {
+    const app = Fastify();
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/deployment-history",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      environment: "unknown",
+      currentVersion: "--",
+      currentDeployedAt: "--",
+      history: [],
+    });
+
+    await app.close();
+  });
+
+  it("rejects invalid deployment history payloads", async () => {
+    const app = Fastify();
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/deployment-history",
+      headers: { authorization: "Bearer staff-token" },
+      payload: {
+        version: "",
+        deployedAt: "",
+        commitSha: "",
+        summary: "",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      message: "Invalid deployment history payload",
+    });
+
+    await app.close();
+  });
+
+  it("rejects invalid routing history limits", async () => {
+    const app = Fastify();
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/routing/history?limit=5000",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ message: "Invalid query parameters" });
+
+    await app.close();
+  });
+
+  it("returns an empty routing history payload when no persisted changes exist", async () => {
+    const app = Fastify();
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/routing/history?limit=5",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ total: 0, history: [] });
 
     await app.close();
   });
@@ -1439,6 +1592,153 @@ describe("backoffice routes", () => {
       },
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://microservice-quizz:7100/games/generate/worker");
+
+    await app.close();
+  });
+
+  it("forwards generation worker stop for editable game services", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ stopped: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/services/microservice-quiz/generation/worker/stop",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://microservice-quizz:7100/games/generate/worker/stop",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ authorization: "Bearer staff-token" }),
+      }),
+    );
+
+    await app.close();
+  });
+
+  it("forwards generation worker start with the normalized payload", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ started: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/services/microservice-wordpass/generation/worker/start",
+      headers: { authorization: "Bearer staff-token" },
+      payload: {
+        countPerIteration: 15,
+        categoryIds: ["12", "41"],
+        difficultyLevels: ["easy", "hard"],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://microservice-wordpass:7101/games/generate/worker/start",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          countPerIteration: 15,
+          categoryIds: ["12", "41"],
+          difficultyLevels: ["easy", "hard"],
+        }),
+      }),
+    );
+
+    await app.close();
+  });
+
+  it("rejects invalid generation worker start payloads before proxying", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/services/microservice-quiz/generation/worker/start",
+      payload: {
+        countPerIteration: 0,
+        difficultyLevels: ["invalid"],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ message: "Invalid payload" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it("rejects generation worker stop for services without runtime game generation support", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/services/microservice-users/generation/worker/stop",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      message: "Service 'microservice-users' does not support runtime game generation",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
 
     await app.close();
   });
