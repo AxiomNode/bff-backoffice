@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AppConfig } from "../config.js";
@@ -33,6 +33,18 @@ type PersistedRoutingState = {
   aiEnginePresets: PersistedAiEnginePreset[];
 };
 
+export type PersistedRoutingHistoryEntry = {
+  recordedAt: string;
+  action:
+    | "service-target-set"
+    | "service-target-delete"
+    | "ai-engine-preset-set"
+    | "ai-engine-preset-delete";
+  service?: PersistedRoutingServiceKey;
+  presetId?: string;
+  state: PersistedRoutingState;
+};
+
 const DEFAULT_AI_ENGINE_PRESETS: PersistedAiEnginePreset[] = [
   {
     id: "this-pc-lan",
@@ -60,6 +72,18 @@ const EMPTY_STATE: PersistedRoutingState = {
 
 function defaultStateFilePath(): string {
   return path.resolve(process.cwd(), ".runtime", "backoffice-routing-state.json");
+}
+
+function defaultHistoryFilePath(): string {
+  return path.resolve(process.cwd(), ".runtime", "backoffice-routing-history.jsonl");
+}
+
+function buildHistoryFilePath(stateFilePath: string): string {
+  const parsed = path.parse(stateFilePath);
+  if (!parsed.dir) {
+    return defaultHistoryFilePath();
+  }
+  return path.join(parsed.dir, `${parsed.name}.history.jsonl`);
 }
 
 function normalizeState(raw: unknown): PersistedRoutingState {
@@ -145,9 +169,11 @@ function normalizeState(raw: unknown): PersistedRoutingState {
 export class RoutingStateStore {
   private state: PersistedRoutingState = { ...EMPTY_STATE };
   private readonly filePath: string;
+  private readonly historyFilePath: string;
 
   constructor(config: AppConfig) {
     this.filePath = config.BACKOFFICE_ROUTING_STATE_FILE?.trim() || defaultStateFilePath();
+    this.historyFilePath = buildHistoryFilePath(this.filePath);
   }
 
   async load(): Promise<void> {
@@ -175,6 +201,28 @@ export class RoutingStateStore {
     return this.state.aiEnginePresets.map((entry) => ({ ...entry }));
   }
 
+  async listHistory(limit = 20): Promise<PersistedRoutingHistoryEntry[]> {
+    const normalizedLimit = Number.isInteger(limit) ? Math.max(1, Math.min(limit, 200)) : 20;
+
+    try {
+      const payload = await readFile(this.historyFilePath, "utf8");
+      const entries = payload
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => normalizeHistoryEntry(JSON.parse(line)))
+        .filter((entry): entry is PersistedRoutingHistoryEntry => entry !== null);
+
+      return entries.slice(-normalizedLimit).reverse();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+  }
+
   async set(service: PersistedRoutingServiceKey, override: PersistedRoutingOverride): Promise<void> {
     this.state = {
       ...this.state,
@@ -183,7 +231,7 @@ export class RoutingStateStore {
         [service]: override,
       },
     };
-    await this.persist();
+    await this.persist({ action: "service-target-set", service });
   }
 
   async delete(service: PersistedRoutingServiceKey): Promise<void> {
@@ -193,7 +241,7 @@ export class RoutingStateStore {
       ...this.state,
       overrides: nextOverrides,
     };
-    await this.persist();
+    await this.persist({ action: "service-target-delete", service });
   }
 
   async setAiEnginePreset(preset: PersistedAiEnginePreset): Promise<void> {
@@ -205,7 +253,7 @@ export class RoutingStateStore {
       ...this.state,
       aiEnginePresets: nextPresets,
     };
-    await this.persist();
+    await this.persist({ action: "ai-engine-preset-set", presetId: preset.id });
   }
 
   async deleteAiEnginePreset(id: string): Promise<boolean> {
@@ -218,12 +266,67 @@ export class RoutingStateStore {
       ...this.state,
       aiEnginePresets: nextPresets,
     };
-    await this.persist();
+    await this.persist({ action: "ai-engine-preset-delete", presetId: id });
     return true;
   }
 
-  private async persist(): Promise<void> {
+  private async persist(change: Omit<PersistedRoutingHistoryEntry, "recordedAt" | "state">): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     await writeFile(this.filePath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
+
+    const entry: PersistedRoutingHistoryEntry = {
+      recordedAt: new Date().toISOString(),
+      ...change,
+      state: cloneState(this.state),
+    };
+    await appendFile(this.historyFilePath, `${JSON.stringify(entry)}\n`, "utf8");
   }
+}
+
+function cloneState(state: PersistedRoutingState): PersistedRoutingState {
+  return {
+    version: 3,
+    overrides: Object.fromEntries(
+      Object.entries(state.overrides).map(([service, override]) => [
+        service,
+        override ? { ...override } : override,
+      ]),
+    ) as PersistedRoutingState["overrides"],
+    aiEnginePresets: state.aiEnginePresets.map((entry) => ({ ...entry })),
+  };
+}
+
+function normalizeHistoryEntry(raw: unknown): PersistedRoutingHistoryEntry | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const candidate = raw as {
+    recordedAt?: unknown;
+    action?: unknown;
+    service?: unknown;
+    presetId?: unknown;
+    state?: unknown;
+  };
+
+  if (
+    typeof candidate.recordedAt !== "string" ||
+    (candidate.action !== "service-target-set" &&
+      candidate.action !== "service-target-delete" &&
+      candidate.action !== "ai-engine-preset-set" &&
+      candidate.action !== "ai-engine-preset-delete")
+  ) {
+    return null;
+  }
+
+  return {
+    recordedAt: candidate.recordedAt,
+    action: candidate.action,
+    service:
+      typeof candidate.service === "string"
+        ? (candidate.service as PersistedRoutingServiceKey)
+        : undefined,
+    presetId: typeof candidate.presetId === "string" ? candidate.presetId : undefined,
+    state: normalizeState(candidate.state),
+  };
 }
