@@ -240,4 +240,102 @@ describe("fetchKubernetesOverview", () => {
       restartCount: 1,
     });
   });
+
+  it("keeps the overview available when metrics APIs are missing", async () => {
+    const namespaceFile = path.join(tempDir, "namespace");
+    const tokenFile = path.join(tempDir, "token");
+    const caFile = path.join(tempDir, "ca.crt");
+
+    await Promise.all([
+      writeFile(namespaceFile, "axiomnode-stg\n", "utf8"),
+      writeFile(tokenFile, "test-token\n", "utf8"),
+      writeFile(caFile, "test-ca\n", "utf8"),
+    ]);
+
+    const apiBaseUrl = await startServer((request, response) => {
+      const payloads: Record<string, unknown> = {
+        "/api/v1/namespaces/axiomnode-stg/pods": {
+          items: [
+            {
+              metadata: {
+                name: "bff-backoffice-123",
+                namespace: "axiomnode-stg",
+              },
+              spec: {
+                nodeName: "node-a",
+                containers: [
+                  {
+                    image: "ghcr.io/axiomnode/bff-backoffice:stg",
+                    resources: {
+                      requests: { cpu: "100m", memory: "128Mi" },
+                      limits: { cpu: "200m", memory: "256Mi" },
+                    },
+                  },
+                ],
+              },
+              status: {
+                phase: "Running",
+                conditions: [{ type: "Ready", status: "True" }],
+                containerStatuses: [{ ready: true, restartCount: 0 }],
+              },
+            },
+          ],
+        },
+        "/apis/apps/v1/namespaces/axiomnode-stg/deployments": {
+          items: [
+            {
+              metadata: { name: "bff-backoffice" },
+              spec: { replicas: 1 },
+              status: { readyReplicas: 1, availableReplicas: 1, updatedReplicas: 1 },
+            },
+          ],
+        },
+        "/apis/apps/v1/namespaces/axiomnode-stg/replicasets": {
+          items: [],
+        },
+        "/api/v1/nodes": {
+          items: [
+            {
+              metadata: { name: "node-a" },
+              status: {
+                capacity: { cpu: "2", memory: "4Gi" },
+                conditions: [{ type: "Ready", status: "True" }],
+              },
+            },
+          ],
+        },
+      };
+
+      const payload = payloads[request.url ?? ""];
+      if (!payload) {
+        response.writeHead(404, { "content-type": "application/json" });
+        response.end(JSON.stringify({ message: "not found" }));
+        return;
+      }
+
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(payload));
+    });
+
+    const payload = await fetchKubernetesOverview({
+      KUBERNETES_API_URL: apiBaseUrl,
+      KUBERNETES_NAMESPACE_FILE: namespaceFile,
+      KUBERNETES_TOKEN_FILE: tokenFile,
+      KUBERNETES_CA_FILE: caFile,
+      KUBERNETES_REQUEST_TIMEOUT_MS: 2000,
+    } as never);
+
+    expect(payload.enabled).toBe(true);
+    expect(payload.source).toBe("cluster");
+    expect(payload.cluster.nodeCount).toBe(1);
+    expect(payload.cluster.podCount).toBe(1);
+    expect(payload.cluster.cpuUsageMillicores).toBe(0);
+    expect(payload.nodes[0]).toMatchObject({
+      name: "node-a",
+      cpuUsageMillicores: null,
+      memoryUsageBytes: null,
+    });
+    expect(payload.message).toContain("Pod metrics API unavailable:");
+    expect(payload.message).toContain("Node metrics API unavailable:");
+  });
 });

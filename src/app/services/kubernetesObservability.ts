@@ -418,6 +418,29 @@ async function requestJson<T>(
   });
 }
 
+async function requestJsonWithFallback<T>(
+  apiBaseUrl: string,
+  resourcePath: string,
+  token: string,
+  ca: string,
+  timeoutMs: number,
+  fallbackValue: T,
+  warningLabel: string,
+): Promise<{ value: T; warning: string | null }> {
+  try {
+    return {
+      value: await requestJson<T>(apiBaseUrl, resourcePath, token, ca, timeoutMs),
+      warning: null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      value: fallbackValue,
+      warning: `${warningLabel} unavailable: ${message}`,
+    };
+  }
+}
+
 export async function fetchKubernetesOverview(config: AppConfig): Promise<KubernetesOverviewPayload> {
   const namespace =
     config.KUBERNETES_NAMESPACE
@@ -441,21 +464,38 @@ export async function fetchKubernetesOverview(config: AppConfig): Promise<Kubern
   const apiBaseUrl = resolveApiBaseUrl(config);
   const timeoutMs = config.KUBERNETES_REQUEST_TIMEOUT_MS ?? 5000;
 
-  const [podList, deploymentList, replicaSetList, nodeList, podMetricList, nodeMetricList] = await Promise.all([
+  const [podList, deploymentList, replicaSetList, nodeList, podMetricResult, nodeMetricResult] = await Promise.all([
     requestJson<KubernetesListResponse<Pod>>(apiBaseUrl, `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods`, token, ca, timeoutMs),
     requestJson<KubernetesListResponse<Deployment>>(apiBaseUrl, `/apis/apps/v1/namespaces/${encodeURIComponent(namespace)}/deployments`, token, ca, timeoutMs),
     requestJson<KubernetesListResponse<ReplicaSet>>(apiBaseUrl, `/apis/apps/v1/namespaces/${encodeURIComponent(namespace)}/replicasets`, token, ca, timeoutMs),
     requestJson<KubernetesListResponse<Node>>(apiBaseUrl, "/api/v1/nodes", token, ca, timeoutMs),
-    requestJson<KubernetesListResponse<PodMetric>>(apiBaseUrl, `/apis/metrics.k8s.io/v1beta1/namespaces/${encodeURIComponent(namespace)}/pods`, token, ca, timeoutMs),
-    requestJson<KubernetesListResponse<NodeMetric>>(apiBaseUrl, "/apis/metrics.k8s.io/v1beta1/nodes", token, ca, timeoutMs),
+    requestJsonWithFallback<KubernetesListResponse<PodMetric>>(
+      apiBaseUrl,
+      `/apis/metrics.k8s.io/v1beta1/namespaces/${encodeURIComponent(namespace)}/pods`,
+      token,
+      ca,
+      timeoutMs,
+      { items: [] },
+      "Pod metrics API",
+    ),
+    requestJsonWithFallback<KubernetesListResponse<NodeMetric>>(
+      apiBaseUrl,
+      "/apis/metrics.k8s.io/v1beta1/nodes",
+      token,
+      ca,
+      timeoutMs,
+      { items: [] },
+      "Node metrics API",
+    ),
   ]);
 
   const pods = podList.items ?? [];
   const deployments = deploymentList.items ?? [];
   const replicaSets = replicaSetList.items ?? [];
   const nodes = nodeList.items ?? [];
-  const podMetrics = new Map((podMetricList.items ?? []).map((metric) => [metric.metadata?.name ?? "", metric]));
-  const nodeMetrics = new Map((nodeMetricList.items ?? []).map((metric) => [metric.metadata?.name ?? "", metric]));
+  const podMetrics = new Map((podMetricResult.value.items ?? []).map((metric) => [metric.metadata?.name ?? "", metric]));
+  const nodeMetrics = new Map((nodeMetricResult.value.items ?? []).map((metric) => [metric.metadata?.name ?? "", metric]));
+  const warnings = [podMetricResult.warning, nodeMetricResult.warning].filter((warning): warning is string => Boolean(warning));
   const replicaSetOwners = new Map<string, string>();
 
   for (const replicaSet of replicaSets) {
@@ -637,7 +677,7 @@ export async function fetchKubernetesOverview(config: AppConfig): Promise<Kubern
     fetchedAt: new Date().toISOString(),
     namespace,
     source: "cluster",
-    message: null,
+    message: warnings.length > 0 ? warnings.join(" ") : null,
     cluster: {
       apiBaseUrl,
       nodeCount: nodeRows.length,
