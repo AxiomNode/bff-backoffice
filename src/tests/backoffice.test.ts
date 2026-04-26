@@ -4,6 +4,13 @@ import path from "node:path";
 import os from "node:os";
 
 import Fastify from "fastify";
+
+const fetchKubernetesOverviewMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../app/services/kubernetesObservability.js", () => ({
+  fetchKubernetesOverview: fetchKubernetesOverviewMock,
+}));
+
 import { backofficeRoutes } from "../app/routes/backoffice.js";
 import { RoutingStateStore } from "../app/services/routingStateStore.js";
 
@@ -19,6 +26,7 @@ function withStateFile<T extends Record<string, unknown>>(config: T): T & { BACK
 
 describe("backoffice routes", () => {
   beforeEach(async () => {
+    fetchKubernetesOverviewMock.mockReset();
     tempStateDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-test-"));
     defaultStateFile = path.join(tempStateDir, "routing-state.json");
   });
@@ -72,6 +80,122 @@ describe("backoffice routes", () => {
         }),
       }),
     );
+
+    await app.close();
+  });
+
+  it("returns kubernetes overview from the observability service", async () => {
+    const app = Fastify();
+
+    fetchKubernetesOverviewMock.mockResolvedValue({
+      enabled: true,
+      fetchedAt: "2026-04-27T10:00:00.000Z",
+      namespace: "axiomnode-stg",
+      source: "cluster",
+      message: null,
+      cluster: {
+        apiBaseUrl: "https://kubernetes.default.svc",
+        nodeCount: 1,
+        readyNodeCount: 1,
+        deploymentCount: 2,
+        podCount: 4,
+        runningPodCount: 4,
+        notReadyPodCount: 0,
+        restartCount: 1,
+        cpuUsageMillicores: 340,
+        cpuCapacityMillicores: 2000,
+        cpuUsageRatio: 0.17,
+        memoryUsageBytes: 805306368,
+        memoryCapacityBytes: 4294967296,
+        memoryUsageRatio: 0.1875,
+        namespaceCpuRequestMillicores: 800,
+        namespaceCpuLimitMillicores: 1200,
+        namespaceMemoryRequestBytes: 536870912,
+        namespaceMemoryLimitBytes: 1073741824,
+      },
+      nodes: [],
+      workloads: [],
+      topPods: [],
+    });
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/kubernetes/overview",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      enabled: true,
+      namespace: "axiomnode-stg",
+      cluster: expect.objectContaining({
+        nodeCount: 1,
+        podCount: 4,
+      }),
+    });
+    expect(fetchKubernetesOverviewMock).toHaveBeenCalledTimes(1);
+
+    await app.close();
+  });
+
+  it("persists and returns deployment history entries", async () => {
+    const app = Fastify();
+    const historyFile = path.join(tempStateDir, "deployment-history.json");
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      BACKOFFICE_DEPLOYMENT_HISTORY_FILE: historyFile,
+      RELEASE_ENV: "stg",
+      RELEASE_VERSION: "abc1234",
+      RELEASE_DEPLOYED_AT: "2026-04-26 20:10 UTC",
+      RELEASE_COMMIT_SHA: "abc123456789",
+      RELEASE_SUMMARY: "Seed release",
+    }));
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/deployment-history",
+      headers: { authorization: "Bearer staff-token" },
+      payload: {
+        version: "def5678",
+        deployedAt: "2026-04-26 21:15 UTC",
+        commitSha: "def56789abcdef",
+        summary: "Runtime rollout",
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+    expect(createResponse.json()).toMatchObject({
+      currentVersion: "def5678",
+      history: expect.arrayContaining([expect.objectContaining({ version: "def5678" })]),
+    });
+
+    const getResponse = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/deployment-history",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(getResponse.statusCode).toBe(200);
+    expect(getResponse.json()).toMatchObject({
+      environment: "stg",
+      currentVersion: "def5678",
+      currentDeployedAt: "2026-04-26 21:15 UTC",
+      history: expect.arrayContaining([
+        expect.objectContaining({ version: "def5678" }),
+        expect.objectContaining({ version: "abc1234" }),
+      ]),
+    });
 
     await app.close();
   });
@@ -2671,6 +2795,53 @@ describe("backoffice routes", () => {
         headers: expect.any(Object),
       }),
     );
+
+    await app.close();
+  });
+
+  it("returns persisted routing history entries for target and preset changes", async () => {
+    const app = Fastify();
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+      BFF_MOBILE_URL: "http://bff-mobile:7010",
+      API_GATEWAY_URL: "http://api-gateway:7005",
+      AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
+      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
+    }));
+
+    const setTargetResponse = await app.inject({
+      method: "PUT",
+      url: "/v1/backoffice/service-targets/api-gateway",
+      payload: { baseUrl: "http://api-gateway:7005", label: "cluster" },
+    });
+    expect(setTargetResponse.statusCode).toBe(200);
+
+    const createPresetResponse = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/ai-engine/presets",
+      payload: { name: "Lab", host: "10.0.0.10", protocol: "http", port: 7002 },
+    });
+    expect(createPresetResponse.statusCode).toBe(201);
+
+    const historyResponse = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/routing/history?limit=10",
+    });
+
+    expect(historyResponse.statusCode).toBe(200);
+    expect(historyResponse.json()).toMatchObject({
+      total: 2,
+      history: [
+        expect.objectContaining({ action: "ai-engine-preset-set" }),
+        expect.objectContaining({ action: "service-target-set", service: "api-gateway" }),
+      ],
+    });
 
     await app.close();
   });

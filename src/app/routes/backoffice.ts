@@ -10,6 +10,8 @@ import {
 import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
+import { DeploymentHistoryStore } from "../services/deploymentHistoryStore.js";
+import { fetchKubernetesOverview } from "../services/kubernetesObservability.js";
 import { ServiceMetrics } from "../services/serviceMetrics.js";
 import {
   RoutingStateStore,
@@ -78,6 +80,13 @@ const DataQuerySchema = z.object({
 
 const LogsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(2000).default(200),
+});
+
+const DeploymentHistoryEntrySchema = z.object({
+  version: z.string().trim().min(1).max(80),
+  deployedAt: z.string().trim().min(1).max(120),
+  commitSha: z.string().trim().min(1).max(120),
+  summary: z.string().trim().min(1).max(240),
 });
 
 function normalizeGenerationProcessPayload(
@@ -1241,6 +1250,8 @@ export async function backofficeRoutes(
   const upstreamTimeoutMs = config.UPSTREAM_TIMEOUT_MS ?? 15000;
   const routingStore = new RoutingStateStore(config);
   await routingStore.load();
+  const deploymentHistoryStore = new DeploymentHistoryStore(config);
+  await deploymentHistoryStore.load();
 
   const runtimeMetrics = metrics ?? {
     snapshot: () => ({
@@ -1273,6 +1284,22 @@ export async function backofficeRoutes(
       total: SERVICE_CATALOG.length,
       services: SERVICE_CATALOG,
     });
+  });
+
+  app.get("/v1/backoffice/deployment-history", async (_request, reply) => {
+    return reply.send(deploymentHistoryStore.get());
+  });
+
+  app.post("/v1/backoffice/deployment-history", async (request, reply) => {
+    const parsed = DeploymentHistoryEntrySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        message: "Invalid deployment history payload",
+        errors: parsed.error.flatten(),
+      });
+    }
+
+    return reply.status(201).send(await deploymentHistoryStore.record(parsed.data));
   });
 
   app.get("/v1/backoffice/services/operational-summary", async (request, reply) => {
@@ -1386,11 +1413,39 @@ export async function backofficeRoutes(
     }
   });
 
+  app.get("/v1/backoffice/kubernetes/overview", async (_request, reply) => {
+    try {
+      return reply.send(await fetchKubernetesOverview(config));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return reply.status(503).send({
+        message: "Failed to load Kubernetes overview",
+        error: message,
+      });
+    }
+  });
+
   app.get("/v1/backoffice/service-targets", async (_request, reply) => {
     const targets = getServiceRuntimeTargets(config, routingStore);
     return reply.send({
       total: targets.length,
       targets,
+    });
+  });
+
+  app.get("/v1/backoffice/routing/history", async (request, reply) => {
+    const parsedLogs = LogsQuerySchema.safeParse(request.query ?? {});
+    if (!parsedLogs.success) {
+      return reply.status(400).send({
+        message: "Invalid query parameters",
+        errors: parsedLogs.error.flatten(),
+      });
+    }
+
+    const entries = await routingStore.listHistory(parsedLogs.data.limit);
+    return reply.send({
+      total: entries.length,
+      history: entries,
     });
   });
 

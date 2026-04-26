@@ -57,10 +57,45 @@ describe("RoutingStateStore", () => {
     expect(persisted.version).toBe(3);
     expect(persisted.overrides["api-gateway"].baseUrl).toBe("http://api-gateway:7005");
 
+    const history = await store.listHistory(10);
+    expect(history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "service-target-set", service: "api-gateway" }),
+        expect.objectContaining({ action: "ai-engine-preset-set", presetId: "lab" }),
+      ]),
+    );
+
     expect(await store.deleteAiEnginePreset("lab")).toBe(true);
     expect(await store.deleteAiEnginePreset("missing")).toBe(false);
     await store.delete("api-gateway");
     expect(store.get("api-gateway")).toBeNull();
+  });
+
+  it("returns routing history in reverse chronological order from persisted JSONL", async () => {
+    const stateFile = path.join(tempDir, "routing-state.json");
+    const store = new RoutingStateStore({ BACKOFFICE_ROUTING_STATE_FILE: stateFile } as never);
+
+    await store.load();
+    await store.set("api-gateway", {
+      baseUrl: "http://api-gateway:7005",
+      updatedAt: "2026-04-21T00:00:00.000Z",
+    });
+    await store.setAiEnginePreset({
+      id: "lab",
+      name: "Lab",
+      host: "10.0.0.10",
+      protocol: "http",
+      port: 7002,
+      updatedAt: "2026-04-21T00:00:01.000Z",
+    });
+
+    const history = await store.listHistory(2);
+    expect(history).toHaveLength(2);
+    expect(history[0]).toMatchObject({ action: "ai-engine-preset-set", presetId: "lab" });
+    expect(history[1]).toMatchObject({ action: "service-target-set", service: "api-gateway" });
+    expect(history[0]?.state.aiEnginePresets).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "lab" })]),
+    );
   });
 
   it("normalizes legacy versions and malformed payloads", async () => {

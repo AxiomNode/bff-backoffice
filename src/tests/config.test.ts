@@ -31,6 +31,8 @@ describe("loadConfig", () => {
       API_GATEWAY_URL: "http://localhost:7005",
       AI_ENGINE_STATS_URL: "http://localhost:7000",
       AI_ENGINE_API_URL: "http://localhost:7001",
+      KUBERNETES_REQUEST_TIMEOUT_MS: 5000,
+      KUBERNETES_OBSERVABILITY_ENABLED: true,
       UPSTREAM_TIMEOUT_MS: 15000,
       UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS: 3000,
       UPSTREAM_METRICS_CACHE_TTL_MS: 5000,
