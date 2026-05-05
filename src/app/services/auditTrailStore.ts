@@ -61,11 +61,6 @@ const ADMIN_ROUTE_RULES: Array<{
     action: (method, route) => `${method} ${route}`,
   },
   {
-    test: (method, route) => method === "POST" && route === "/v1/backoffice/deployment-history",
-    category: "deployment.history",
-    action: () => "POST /v1/backoffice/deployment-history",
-  },
-  {
     test: (method, route) =>
       ["POST", "PATCH", "DELETE"].includes(method) &&
       /^\/v1\/backoffice\/services\/[^/]+\/data/.test(route),

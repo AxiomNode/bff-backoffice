@@ -61,15 +61,6 @@ describe("classifyAdminAction", () => {
     expect(genResult.audit && genResult.category).toBe("ai.generation.start");
   });
 
-  it("captures persistent deployment history mutations", () => {
-    const result = classifyAdminAction("POST", "/v1/backoffice/deployment-history");
-    expect(result).toEqual({
-      audit: true,
-      category: "deployment.history",
-      action: "POST /v1/backoffice/deployment-history",
-    });
-  });
-
   it("ignores reads and unknown routes", () => {
     expect(classifyAdminAction("GET", "/v1/backoffice/admin/users/roles").audit).toBe(false);
     expect(classifyAdminAction("GET", "/v1/backoffice/services/microservice-quiz/data").audit).toBe(false);

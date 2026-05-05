@@ -13,12 +13,6 @@ const envSchema = z.object({
   API_GATEWAY_URL: z.string().url().default("http://localhost:7005"),
   AI_ENGINE_STATS_URL: z.string().url().default("http://localhost:7000"),
   AI_ENGINE_API_URL: z.string().url().default("http://localhost:7001"),
-  BACKOFFICE_DEPLOYMENT_HISTORY_FILE: z.string().min(1).optional(),
-  RELEASE_ENV: z.string().min(1).optional(),
-  RELEASE_VERSION: z.string().min(1).optional(),
-  RELEASE_DEPLOYED_AT: z.string().min(1).optional(),
-  RELEASE_COMMIT_SHA: z.string().min(1).optional(),
-  RELEASE_SUMMARY: z.string().min(1).optional(),
   KUBERNETES_API_URL: z.string().url().optional(),
   KUBERNETES_NAMESPACE: z.string().min(1).optional(),
   KUBERNETES_TOKEN_FILE: z.string().min(1).optional(),
@@ -60,12 +54,6 @@ export type AppConfig = Omit<
   | "API_GATEWAY_URL"
   | "AI_ENGINE_STATS_URL"
   | "AI_ENGINE_API_URL"
-  | "BACKOFFICE_DEPLOYMENT_HISTORY_FILE"
-  | "RELEASE_ENV"
-  | "RELEASE_VERSION"
-  | "RELEASE_DEPLOYED_AT"
-  | "RELEASE_COMMIT_SHA"
-  | "RELEASE_SUMMARY"
   | "KUBERNETES_API_URL"
   | "KUBERNETES_NAMESPACE"
   | "KUBERNETES_TOKEN_FILE"
@@ -95,12 +83,6 @@ export type AppConfig = Omit<
   API_GATEWAY_URL?: string;
   AI_ENGINE_STATS_URL?: string;
   AI_ENGINE_API_URL?: string;
-  BACKOFFICE_DEPLOYMENT_HISTORY_FILE?: string;
-  RELEASE_ENV?: string;
-  RELEASE_VERSION?: string;
-  RELEASE_DEPLOYED_AT?: string;
-  RELEASE_COMMIT_SHA?: string;
-  RELEASE_SUMMARY?: string;
   KUBERNETES_API_URL?: string;
   KUBERNETES_NAMESPACE?: string;
   KUBERNETES_TOKEN_FILE?: string;
