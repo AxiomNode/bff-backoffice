@@ -50,9 +50,20 @@ const ADMIN_ROUTE_RULES: Array<{
   },
   {
     test: (method, route) =>
+      ["POST", "PUT", "DELETE"].includes(method) && route.startsWith("/v1/backoffice/ai-engine/connections"),
+    category: "routing.ai-engine.connection",
+    action: (method, route) => `${method} ${route}`,
+  },
+  {
+    test: (method, route) =>
       ["PUT", "DELETE", "POST"].includes(method) && route.startsWith("/v1/backoffice/ai-engine/target"),
     category: "routing.ai-engine.target",
     action: (method, route) => `${method} ${route}`,
+  },
+  {
+    test: (method, route) => method === "POST" && route === "/v1/backoffice/deployment-history",
+    category: "deployment.history",
+    action: () => "POST /v1/backoffice/deployment-history",
   },
   {
     test: (method, route) =>

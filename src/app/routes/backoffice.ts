@@ -413,6 +413,35 @@ function getAiEnginePresetList(routingStore: RoutingStateStore) {
   };
 }
 
+function getAiEngineActivePresetId(presets: PersistedAiEnginePreset[], target: Record<string, unknown>): string | null {
+  const host = typeof target.host === "string" ? target.host : null;
+  const protocol = target.protocol === "http" || target.protocol === "https" ? target.protocol : "http";
+  const port = typeof target.port === "number" ? target.port : null;
+
+  if (!host || port === null) {
+    return null;
+  }
+
+  return presets.find((entry) => entry.host === host && entry.protocol === protocol && entry.port === port)?.id ?? null;
+}
+
+async function getAiEngineConnectionState(config: AppConfig, routingStore: RoutingStateStore) {
+  const target = await getAiEngineRuntimeTarget(config, routingStore);
+  const presets = routingStore.listAiEnginePresets();
+  const activeConnectionId = getAiEngineActivePresetId(presets, target);
+  const connections = presets.map((preset) => ({
+    ...getAiEnginePresetPayload(preset),
+    active: preset.id === activeConnectionId,
+  }));
+
+  return {
+    total: connections.length,
+    activeConnectionId,
+    target,
+    connections,
+  };
+}
+
 function getServiceCatalogTitle(service: ServiceKey): string {
   return SERVICE_CATALOG.find((entry) => entry.key === service)?.title ?? service;
 }
@@ -726,6 +755,31 @@ async function getAiEngineRuntimeTarget(
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || `ai-engine llama target read failed with HTTP ${response.status}`);
+  }
+
+  return response.json() as Promise<Record<string, unknown>>;
+}
+
+async function getAiEnginePluginCapabilities(
+  config: AppConfig,
+  routingStore: RoutingStateStore,
+): Promise<Record<string, unknown>> {
+  const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/internal/plugin/capabilities", {});
+  const headers: Record<string, string> = {};
+
+  const serviceApiKey = resolveServiceApiKey(config, "ai-engine-api");
+  if (serviceApiKey) {
+    headers["x-api-key"] = serviceApiKey;
+  }
+
+  const response = await fetch(targetUrl, {
+    method: "GET",
+    headers,
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `ai-engine plugin capabilities read failed with HTTP ${response.status}`);
   }
 
   return response.json() as Promise<Record<string, unknown>>;
@@ -1507,6 +1561,108 @@ export async function backofficeRoutes(
 
   app.get("/v1/backoffice/ai-engine/target", async (_request, reply) => {
     return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
+  });
+
+  app.get("/v1/backoffice/ai-engine/plugin/capabilities", async (_request, reply) => {
+    try {
+      return reply.send(await getAiEnginePluginCapabilities(config, routingStore));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return reply.status(502).send({ message: `ai-engine-api unreachable: ${message}` });
+    }
+  });
+
+  app.get("/v1/backoffice/ai-engine/connections", async (_request, reply) => {
+    return reply.send(await getAiEngineConnectionState(config, routingStore));
+  });
+
+  app.post("/v1/backoffice/ai-engine/connections", async (request, reply) => {
+    const parsed = AiEnginePresetSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsed.error.flatten(),
+      });
+    }
+
+    try {
+      await saveAiEnginePreset(routingStore, randomUUID(), parsed.data);
+      return reply.status(201).send(await getAiEngineConnectionState(config, routingStore));
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Invalid ai-engine connection",
+      });
+    }
+  });
+
+  app.put("/v1/backoffice/ai-engine/connections/:presetId", async (request, reply) => {
+    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
+    if (!parsedParams.success) {
+      return reply.status(400).send({ message: "Invalid connection id" });
+    }
+
+    const parsedBody = AiEnginePresetSchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.status(400).send({
+        message: "Invalid payload",
+        errors: parsedBody.error.flatten(),
+      });
+    }
+
+    const exists = routingStore.listAiEnginePresets().some((entry) => entry.id === parsedParams.data.presetId);
+    if (!exists) {
+      return reply.status(404).send({ message: "Connection not found" });
+    }
+
+    try {
+      await saveAiEnginePreset(routingStore, parsedParams.data.presetId, parsedBody.data);
+      return reply.send(await getAiEngineConnectionState(config, routingStore));
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Invalid ai-engine connection",
+      });
+    }
+  });
+
+  app.delete("/v1/backoffice/ai-engine/connections/:presetId", async (request, reply) => {
+    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
+    if (!parsedParams.success) {
+      return reply.status(400).send({ message: "Invalid connection id" });
+    }
+
+    const deleted = await routingStore.deleteAiEnginePreset(parsedParams.data.presetId);
+    if (!deleted) {
+      return reply.status(404).send({ message: "Connection not found" });
+    }
+
+    return reply.send(await getAiEngineConnectionState(config, routingStore));
+  });
+
+  app.post("/v1/backoffice/ai-engine/connections/:presetId/activate", async (request, reply) => {
+    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
+    if (!parsedParams.success) {
+      return reply.status(400).send({ message: "Invalid connection id" });
+    }
+
+    const preset = routingStore.listAiEnginePresets().find((entry) => entry.id === parsedParams.data.presetId);
+    if (!preset) {
+      return reply.status(404).send({ message: "Connection not found" });
+    }
+
+    try {
+      await syncAiEngineLlamaTarget(config, routingStore, "PUT", {
+        host: preset.host,
+        protocol: preset.protocol,
+        port: preset.port,
+        label: preset.name,
+      });
+      clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
+      return reply.send(await getAiEngineConnectionState(config, routingStore));
+    } catch (error) {
+      return reply.status(400).send({
+        message: error instanceof Error ? error.message : "Invalid ai-engine connection",
+      });
+    }
   });
 
   app.get("/v1/backoffice/ai-engine/presets", async (_request, reply) => {

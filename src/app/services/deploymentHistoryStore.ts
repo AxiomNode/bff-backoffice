@@ -94,6 +94,10 @@ function uniqueHistory(entries: DeploymentHistoryEntry[]): DeploymentHistoryEntr
   return result;
 }
 
+function sameRelease(left: DeploymentHistoryEntry, right: DeploymentHistoryEntry): boolean {
+  return left.version === right.version && left.deployedAt === right.deployedAt;
+}
+
 function buildSeedEntry(config: AppConfig): DeploymentHistoryEntry | null {
   const version = config.RELEASE_VERSION?.trim();
   const deployedAt = config.RELEASE_DEPLOYED_AT?.trim();
@@ -140,7 +144,7 @@ export class DeploymentHistoryStore {
       };
     }
 
-    if (this.seedEntry && this.state.history.length === 0) {
+    if (this.seedEntry && !this.state.history.some((entry) => sameRelease(entry, this.seedEntry as DeploymentHistoryEntry))) {
       await this.record(this.seedEntry);
     }
   }
