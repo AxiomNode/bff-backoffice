@@ -1186,7 +1186,8 @@ async function readDatasetRows(
   }
 
   if (service === "microservice-users" && dataset === "leaderboard") {
-    const path = `/users/leaderboard?metric=${encodeURIComponent(query.metric)}&limit=${query.limit}`;
+    const upstreamLimit = Math.min(query.limit, 100);
+    const path = `/users/leaderboard?metric=${encodeURIComponent(query.metric)}&limit=${upstreamLimit}`;
     const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as {
       rows?: Array<Record<string, unknown>>;
       metric?: string;
@@ -1454,6 +1455,7 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/service-targets", async (_request, reply) => {
+    await routingStore.load();
     const targets = getServiceRuntimeTargets(config, routingStore);
     return reply.send({
       total: targets.length,
@@ -1478,6 +1480,7 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/service-targets/:service", async (request, reply) => {
+    await routingStore.load();
     const service = getConfigurableServiceTargetKeyOrReply(
       reply,
       (request.params as { service?: string } | undefined)?.service,
@@ -1534,11 +1537,13 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/ai-engine/target", async (_request, reply) => {
+    await routingStore.load();
     return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
   });
 
   app.get("/v1/backoffice/ai-engine/plugin/capabilities", async (_request, reply) => {
     try {
+      await routingStore.load();
       return reply.send(await getAiEnginePluginCapabilities(config, routingStore));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -1547,6 +1552,7 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/ai-engine/connections", async (_request, reply) => {
+    await routingStore.load();
     return reply.send(await getAiEngineConnectionState(config, routingStore));
   });
 
@@ -1583,6 +1589,7 @@ export async function backofficeRoutes(
       });
     }
 
+    await routingStore.load();
     const exists = routingStore.listAiEnginePresets().some((entry) => entry.id === parsedParams.data.presetId);
     if (!exists) {
       return reply.status(404).send({ message: "Connection not found" });
@@ -1613,6 +1620,7 @@ export async function backofficeRoutes(
   });
 
   app.post("/v1/backoffice/ai-engine/connections/:presetId/activate", async (request, reply) => {
+    await routingStore.load();
     const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
     if (!parsedParams.success) {
       return reply.status(400).send({ message: "Invalid connection id" });
@@ -1640,6 +1648,7 @@ export async function backofficeRoutes(
   });
 
   app.get("/v1/backoffice/ai-engine/presets", async (_request, reply) => {
+    await routingStore.load();
     return reply.send(getAiEnginePresetList(routingStore));
   });
 
@@ -1702,6 +1711,7 @@ export async function backofficeRoutes(
       });
     }
 
+    await routingStore.load();
     const exists = routingStore.listAiEnginePresets().some((entry) => entry.id === parsedParams.data.presetId);
     if (!exists) {
       return reply.status(404).send({ message: "Preset not found" });

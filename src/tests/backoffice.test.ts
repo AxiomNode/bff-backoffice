@@ -1030,6 +1030,37 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("clamps leaderboard dataset limit to the users service maximum", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ metric: "score", rows: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-users/data?dataset=leaderboard&metric=score&limit=200",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://microservice-users:7102/users/leaderboard?metric=score&limit=100");
+
+    await app.close();
+  });
+
   it("filters and sorts history rows in the BFF when upstream paging metadata is not usable", async () => {
     const app = Fastify();
 
