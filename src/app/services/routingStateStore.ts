@@ -224,6 +224,7 @@ export class RoutingStateStore {
   }
 
   async set(service: PersistedRoutingServiceKey, override: PersistedRoutingOverride): Promise<void> {
+    await this.load();
     this.state = {
       ...this.state,
       overrides: {
@@ -235,6 +236,7 @@ export class RoutingStateStore {
   }
 
   async delete(service: PersistedRoutingServiceKey): Promise<void> {
+    await this.load();
     const nextOverrides = { ...this.state.overrides };
     delete nextOverrides[service];
     this.state = {
@@ -245,6 +247,7 @@ export class RoutingStateStore {
   }
 
   async setAiEnginePreset(preset: PersistedAiEnginePreset): Promise<void> {
+    await this.load();
     const nextPresets = this.state.aiEnginePresets.some((entry) => entry.id === preset.id)
       ? this.state.aiEnginePresets.map((entry) => (entry.id === preset.id ? preset : entry))
       : [...this.state.aiEnginePresets, preset];
@@ -257,6 +260,7 @@ export class RoutingStateStore {
   }
 
   async deleteAiEnginePreset(id: string): Promise<boolean> {
+    await this.load();
     const nextPresets = this.state.aiEnginePresets.filter((entry) => entry.id !== id);
     if (nextPresets.length === this.state.aiEnginePresets.length) {
       return false;

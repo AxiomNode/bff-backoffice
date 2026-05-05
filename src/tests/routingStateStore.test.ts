@@ -98,6 +98,40 @@ describe("RoutingStateStore", () => {
     );
   });
 
+  it("reloads persisted state before writes so multiple instances stay coherent", async () => {
+    const stateFile = path.join(tempDir, "routing-state.json");
+    const firstStore = new RoutingStateStore({ BACKOFFICE_ROUTING_STATE_FILE: stateFile } as never);
+    const secondStore = new RoutingStateStore({ BACKOFFICE_ROUTING_STATE_FILE: stateFile } as never);
+
+    await firstStore.load();
+    await secondStore.load();
+
+    await firstStore.setAiEnginePreset({
+      id: "first",
+      name: "First",
+      host: "10.0.0.11",
+      protocol: "http",
+      port: 7002,
+      updatedAt: "2026-04-21T00:00:01.000Z",
+    });
+    await secondStore.setAiEnginePreset({
+      id: "second",
+      name: "Second",
+      host: "10.0.0.12",
+      protocol: "http",
+      port: 7003,
+      updatedAt: "2026-04-21T00:00:02.000Z",
+    });
+
+    const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+    expect(persisted.aiEnginePresets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "first" }),
+        expect.objectContaining({ id: "second" }),
+      ]),
+    );
+  });
+
   it("normalizes legacy versions and malformed payloads", async () => {
     const version2File = path.join(tempDir, "version2-state.json");
     await writeFile(
