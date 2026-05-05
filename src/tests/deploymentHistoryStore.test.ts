@@ -95,9 +95,46 @@ describe("DeploymentHistoryStore", () => {
     expect(store.get()).toMatchObject({
       environment: "prod",
       currentVersion: "abc1234",
-      history: [expect.objectContaining({ version: "abc1234" })],
     });
-    expect(store.get().history).toHaveLength(1);
+    expect(store.get().history.map((entry) => entry.version)).toEqual(["abc1234", "seed999"]);
+  });
+
+  it("records a new release seed when persisted history already exists", async () => {
+    const filePath = path.join(tempDir, "deployment-history.json");
+    await writeFile(
+      filePath,
+      `${JSON.stringify({
+        environment: "stg",
+        currentVersion: "abc1234",
+        currentDeployedAt: "2026-04-20 09:00 UTC",
+        history: [
+          {
+            version: "abc1234",
+            deployedAt: "2026-04-20 09:00 UTC",
+            commitSha: "abc123456789",
+            summary: "Previous release",
+          },
+        ],
+      })}\n`,
+      "utf8",
+    );
+
+    const store = new DeploymentHistoryStore({
+      BACKOFFICE_DEPLOYMENT_HISTORY_FILE: filePath,
+      RELEASE_ENV: "stg",
+      RELEASE_VERSION: "def5678",
+      RELEASE_DEPLOYED_AT: "2026-04-26 21:15 UTC",
+      RELEASE_COMMIT_SHA: "def56789abcdef",
+      RELEASE_SUMMARY: "New release from deployment metadata",
+    } as never);
+
+    await store.load();
+
+    expect(store.get()).toMatchObject({
+      currentVersion: "def5678",
+      currentDeployedAt: "2026-04-26 21:15 UTC",
+    });
+    expect(store.get().history.map((entry) => entry.version)).toEqual(["def5678", "abc1234"]);
   });
 
   it("falls back to defaults when the persisted payload is malformed", async () => {

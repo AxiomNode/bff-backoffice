@@ -47,8 +47,10 @@ describe("classifyAdminAction", () => {
 
   it("captures ai-engine preset and target mutations", () => {
     const presetResult = classifyAdminAction("POST", "/v1/backoffice/ai-engine/presets");
+    const connectionResult = classifyAdminAction("POST", "/v1/backoffice/ai-engine/connections/abc/activate");
     const targetResult = classifyAdminAction("PUT", "/v1/backoffice/ai-engine/target");
     expect(presetResult.audit && presetResult.category).toBe("routing.ai-engine.preset");
+    expect(connectionResult.audit && connectionResult.category).toBe("routing.ai-engine.connection");
     expect(targetResult.audit && targetResult.category).toBe("routing.ai-engine.target");
   });
 
@@ -57,6 +59,15 @@ describe("classifyAdminAction", () => {
     const genResult = classifyAdminAction("POST", "/v1/backoffice/services/microservice-quiz/generation/process");
     expect(dataResult.audit && dataResult.category).toBe("data.mutation");
     expect(genResult.audit && genResult.category).toBe("ai.generation.start");
+  });
+
+  it("captures persistent deployment history mutations", () => {
+    const result = classifyAdminAction("POST", "/v1/backoffice/deployment-history");
+    expect(result).toEqual({
+      audit: true,
+      category: "deployment.history",
+      action: "POST /v1/backoffice/deployment-history",
+    });
   });
 
   it("ignores reads and unknown routes", () => {

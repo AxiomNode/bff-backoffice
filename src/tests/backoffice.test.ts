@@ -3472,6 +3472,130 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("exposes ai-engine plugin capabilities through the backoffice BFF", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        pluginType: "thin-llm-runtime",
+        status: "ready",
+        capabilities: {
+          pluginMode: "http-openai-compatible",
+          models: ["mistral-7b"],
+        },
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/ai-engine/plugin/capabilities",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      pluginType: "thin-llm-runtime",
+      status: "ready",
+      capabilities: { models: ["mistral-7b"] },
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://ai-engine-api:7001/internal/plugin/capabilities");
+
+    await app.close();
+  });
+
+  it("manages persistent ai-engine connections and activates a saved connection", async () => {
+    const app = Fastify();
+
+    let activeTarget = {
+      source: "env",
+      label: null,
+      host: "localhost",
+      protocol: "http",
+      port: 7002,
+      llamaBaseUrl: "http://localhost:7002/v1/completions",
+    };
+
+    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (url === "http://ai-engine-api:7001/internal/admin/llama-target" && (!options?.method || options.method === "GET")) {
+        return Promise.resolve(new Response(JSON.stringify(activeTarget), { status: 200, headers: { "content-type": "application/json" } }));
+      }
+
+      if (url === "http://ai-engine-api:7001/internal/admin/llama-target" && options?.method === "PUT") {
+        const body = JSON.parse(String(options.body));
+        activeTarget = {
+          source: "override",
+          label: body.label,
+          host: body.host,
+          protocol: body.protocol,
+          port: body.port,
+          llamaBaseUrl: `${body.protocol}://${body.host}:${body.port}/v1/completions`,
+        };
+        return Promise.resolve(new Response(JSON.stringify(activeTarget), { status: 200, headers: { "content-type": "application/json" } }));
+      }
+
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
+      ALLOWED_ROUTING_TARGET_HOSTS: "localhost,127.0.0.1,10.0.0.0/8",
+    }));
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/ai-engine/connections",
+      payload: {
+        name: "Lab GPU",
+        host: "10.0.0.44",
+        protocol: "http",
+        port: 17002,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+    const created = createResponse.json() as { connections: Array<{ id: string; name: string; active: boolean }> };
+    const connection = created.connections.find((entry) => entry.name === "Lab GPU");
+    expect(connection).toBeTruthy();
+    expect(connection?.active).toBe(false);
+
+    const activateResponse = await app.inject({
+      method: "POST",
+      url: `/v1/backoffice/ai-engine/connections/${connection!.id}/activate`,
+    });
+
+    expect(activateResponse.statusCode).toBe(200);
+    expect(activateResponse.json()).toMatchObject({
+      activeConnectionId: connection!.id,
+      target: {
+        source: "override",
+        label: "Lab GPU",
+        host: "10.0.0.44",
+        port: 17002,
+      },
+      connections: expect.arrayContaining([expect.objectContaining({ id: connection!.id, active: true })]),
+    });
+
+    await app.close();
+  });
+
   it("surfaces ai-engine route validation and not-found errors", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-ai-errors-"));
     const stateFile = path.join(tempDir, "routing-state.json");
