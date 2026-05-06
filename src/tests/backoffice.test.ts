@@ -3887,6 +3887,104 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("uses https for Cloudflare tunnel targets on port 443", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://unit-appliances-signals-cos.trycloudflare.com:443/v1/models") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ object: "list", data: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/ai-engine/probe",
+      payload: {
+        host: "unit-appliances-signals-cos.trycloudflare.com",
+        protocol: "http",
+        port: 443,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      host: "unit-appliances-signals-cos.trycloudflare.com",
+      protocol: "https",
+      port: 443,
+      reachable: true,
+      llama: {
+        url: "https://unit-appliances-signals-cos.trycloudflare.com:443/v1/models",
+      },
+    });
+
+    await app.close();
+  });
+
+  it("uses https when probe host is pasted as an https URL", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://unit-appliances-signals-cos.trycloudflare.com:443/v1/models") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ object: "list", data: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/ai-engine/probe",
+      payload: {
+        host: "https://unit-appliances-signals-cos.trycloudflare.com",
+        protocol: "http",
+        port: 443,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      host: "unit-appliances-signals-cos.trycloudflare.com",
+      protocol: "https",
+      port: 443,
+      reachable: true,
+      llama: {
+        url: "https://unit-appliances-signals-cos.trycloudflare.com:443/v1/models",
+      },
+    });
+
+    await app.close();
+  });
+
   it("fetches ai-engine-api metrics through the health endpoint branch", async () => {
     const app = Fastify();
 

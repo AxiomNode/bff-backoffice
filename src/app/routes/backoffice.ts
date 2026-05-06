@@ -226,6 +226,17 @@ const AiEnginePresetIdParamsSchema = z.object({
   presetId: z.string().trim().min(1).max(120),
 });
 
+type NormalizedAiEngineTargetInput = {
+  host: string;
+  protocol: "http" | "https";
+  port: number;
+  label?: string;
+};
+
+type NormalizedAiEnginePresetInput = NormalizedAiEngineTargetInput & {
+  name: string;
+};
+
 type AiEngineProbeEndpointStatus = {
   ok: boolean;
   status: number | null;
@@ -304,6 +315,38 @@ function normalizeAiEngineHost(raw: string): string {
   }
 
   return withoutPort;
+}
+
+function normalizeAiEngineTargetInput(input: z.infer<typeof AiEngineTargetSchema>): NormalizedAiEngineTargetInput {
+  const trimmedHost = input.host.trim();
+  const explicitHttps = /^https:\/\//i.test(trimmedHost);
+  const host = normalizeAiEngineHost(trimmedHost);
+  let protocol = explicitHttps ? "https" : input.protocol;
+  const port = input.port;
+
+  if (port === 443 && host.endsWith(".trycloudflare.com")) {
+    protocol = "https";
+  }
+
+  return {
+    host,
+    protocol,
+    port,
+    label: input.label,
+  };
+}
+
+function normalizeAiEnginePresetInput(input: z.infer<typeof AiEnginePresetSchema>): NormalizedAiEnginePresetInput {
+  const target = normalizeAiEngineTargetInput({
+    host: input.host,
+    protocol: input.protocol,
+    port: input.port,
+  });
+
+  return {
+    ...target,
+    name: input.name,
+  };
 }
 
 function buildAiEngineBaseUrl(protocol: "http" | "https", host: string, port: number): string {
@@ -655,13 +698,13 @@ async function saveAiEnginePreset(
   presetId: string,
   input: z.infer<typeof AiEnginePresetSchema>,
 ): Promise<PersistedAiEnginePreset> {
-  const host = normalizeAiEngineHost(input.host);
+  const normalized = normalizeAiEnginePresetInput(input);
   const preset: PersistedAiEnginePreset = {
     id: presetId,
-    name: input.name.trim(),
-    host,
-    protocol: input.protocol,
-    port: input.port,
+    name: normalized.name.trim(),
+    host: normalized.host,
+    protocol: normalized.protocol,
+    port: normalized.port,
     updatedAt: new Date().toISOString(),
   };
   await routingStore.setAiEnginePreset(preset);
@@ -713,16 +756,16 @@ async function probeAiEngineTarget(
   config: AppConfig,
   input: z.infer<typeof AiEngineTargetSchema>,
 ): Promise<AiEngineProbeResult> {
-  const host = normalizeAiEngineHost(input.host);
-  const llamaUrl = `${buildAiEngineBaseUrl(input.protocol, host, input.port)}/v1/models`;
+  const normalized = normalizeAiEngineTargetInput(input);
+  const llamaUrl = `${buildAiEngineBaseUrl(normalized.protocol, normalized.host, normalized.port)}/v1/models`;
   const timeoutMs = Math.min(config.UPSTREAM_TIMEOUT_MS ?? 15000, 8000);
 
   const llama = await probeAiEngineEndpoint(llamaUrl, undefined, timeoutMs);
 
   return {
-    host,
-    protocol: input.protocol,
-    port: input.port,
+    host: normalized.host,
+    protocol: normalized.protocol,
+    port: normalized.port,
     reachable: llama.ok,
     llama,
   };
@@ -1754,7 +1797,7 @@ export async function backofficeRoutes(
     }
 
     try {
-      await syncAiEngineLlamaTarget(config, routingStore, "PUT", parsed.data as Record<string, unknown>);
+      await syncAiEngineLlamaTarget(config, routingStore, "PUT", normalizeAiEngineTargetInput(parsed.data));
       clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
       return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
     } catch (error) {
