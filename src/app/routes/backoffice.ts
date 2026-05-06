@@ -1982,7 +1982,7 @@ export async function backofficeRoutes(
     }
 
     if (service === "ai-engine-stats") {
-      const path = `/stats/history?limit=${limit}`;
+      const path = `/stats/history?last_n=${limit}`;
       const payload = await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
       return reply.send({ service, logs: payload });
     }

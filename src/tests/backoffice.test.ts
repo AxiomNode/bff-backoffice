@@ -2285,7 +2285,7 @@ describe("backoffice routes", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://ai-engine-stats:7000/stats/history?limit=15");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://ai-engine-stats:7000/stats/history?last_n=15");
 
     await app.close();
   });
