@@ -737,12 +737,12 @@ describe("backoffice routes", () => {
   it("uses upstream history pagination metadata for quiz data queries", async () => {
     const app = Fastify();
 
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
       new Response(JSON.stringify({ items: [{ id: "entry-9" }], total: 87, page: 3, pageSize: 25 }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
-    );
+    ));
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -816,26 +816,34 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
-  it("returns category insights for quiz history dataset", async () => {
+  it("returns category insights for the complete quiz history dataset", async () => {
     const app = Fastify();
 
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({
-        items: [
-          { id: "q-1", categoryId: "10", categoryName: "History" },
-          { id: "q-2", categoryId: "10", categoryName: "History" },
-          { id: "q-3", categoryId: "10", categoryName: "History" },
-          { id: "q-4", categoryId: "20", categoryName: "Science" },
-          { id: "q-5", categoryId: "30", categoryName: "Art" },
-        ],
-        total: 5,
-        page: 1,
-        pageSize: 20,
-      }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+    const pageRows = [
+      { id: "q-1", categoryId: "10", categoryName: "History" },
+      { id: "q-2", categoryId: "10", categoryName: "History" },
+    ];
+    const totalRows = [
+      ...pageRows,
+      { id: "q-3", categoryId: "10", categoryName: "History" },
+      { id: "q-4", categoryId: "20", categoryName: "Science" },
+      { id: "q-5", categoryId: "30", categoryName: "Art" },
+    ];
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      const items = url.includes("pageSize=200") ? totalRows : pageRows;
+      return Promise.resolve(
+        new Response(JSON.stringify({
+          items,
+          total: 5,
+          page: 1,
+          pageSize: url.includes("pageSize=200") ? 200 : 2,
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -849,11 +857,12 @@ describe("backoffice routes", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/v1/backoffice/services/microservice-quiz/data?dataset=history&limit=100",
+      url: "/v1/backoffice/services/microservice-quiz/data?dataset=history&pageSize=2&limit=100",
       headers: { authorization: "Bearer staff-token" },
     });
 
     expect(response.statusCode).toBe(200);
+    expect(response.json().rows).toHaveLength(2);
     expect(response.json()).toMatchObject({
       service: "microservice-quiz",
       dataset: "history",

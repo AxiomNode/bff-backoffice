@@ -1331,6 +1331,60 @@ async function readDatasetRows(
   throw new Error(`Dataset '${dataset}' not supported for ${service}`);
 }
 
+async function readCompleteHistoryRows(
+  service: ServiceKey,
+  query: z.infer<typeof DataQuerySchema>,
+  initialResult: { rows: Row[]; total?: number; page?: number; pageSize?: number },
+  config: AppConfig,
+  routingStore: RoutingStateStore,
+  request: FastifyRequest,
+  upstreamCache: Map<string, CachedUpstreamResponse>,
+  upstreamBreakers: Map<string, CircuitBreaker>,
+): Promise<Row[]> {
+  const initialTotal = typeof initialResult.total === "number" ? initialResult.total : initialResult.rows.length;
+  if (initialTotal <= initialResult.rows.length) {
+    return initialResult.rows.slice(0, initialTotal);
+  }
+
+  const pageSize = 200;
+  const firstPage = await readDatasetRows(
+    service,
+    "history",
+    { ...query, page: 1, pageSize },
+    config,
+    routingStore,
+    request,
+    upstreamCache,
+    upstreamBreakers,
+  );
+  const total = typeof firstPage.total === "number" ? firstPage.total : firstPage.rows.length;
+  const rows = [...firstPage.rows];
+
+  if (total <= rows.length) {
+    return rows.slice(0, total);
+  }
+
+  const pageCount = Math.ceil(total / pageSize);
+  for (let page = 2; page <= pageCount; page += 1) {
+    const pageResult = await readDatasetRows(
+      service,
+      "history",
+      { ...query, page, pageSize },
+      config,
+      routingStore,
+      request,
+      upstreamCache,
+      upstreamBreakers,
+    );
+    if (pageResult.rows.length === 0) {
+      break;
+    }
+    rows.push(...pageResult.rows);
+  }
+
+  return rows.slice(0, total);
+}
+
 /** Registers all backoffice API routes (auth, users, services, data, generation, AI diagnostics). */
 export async function backofficeRoutes(
   app: FastifyInstance,
@@ -1996,11 +2050,12 @@ export async function backofficeRoutes(
           rows: dataResult.rows,
         }
       : applyRowsQuery(dataResult.rows, query);
-    const insights =
+    const insightRows =
       query.dataset === "history" &&
       (service === "microservice-quiz" || service === "microservice-wordpass")
-        ? buildHistoryDatasetInsights(dataResult.rows)
-        : null;
+        ? await readCompleteHistoryRows(service, query, dataResult, config, routingStore, request, upstreamCache, upstreamBreakers)
+        : [];
+    const insights = insightRows.length > 0 ? buildHistoryDatasetInsights(insightRows) : null;
     return reply.send({
       service,
       dataset: query.dataset,
