@@ -1,6 +1,6 @@
 # bff-backoffice
 
-Last updated: 2026-05-03.
+Last updated: 2026-05-08.
 
 [![codecov](https://codecov.io/gh/AxiomNode/bff-backoffice/branch/main/graph/badge.svg)](https://codecov.io/gh/AxiomNode/bff-backoffice)
 
@@ -45,6 +45,15 @@ Concrete responsibilities beyond standard orchestration:
 - persist reusable ai-engine destination presets
 - synchronize ai-engine target changes toward `api-gateway`
 - expose effective target state back to the UI
+
+### Role-facing admin routes
+
+`bff-backoffice` proxies the user-role management surface from `microservice-users` for Backoffice consumers:
+
+- `GET /v1/backoffice/admin/users/roles`: readable by `SuperAdmin` and `Inspector` after downstream auth validation.
+- `PATCH /v1/backoffice/admin/users/roles/:firebaseUid`: mutation remains restricted to `SuperAdmin` downstream.
+
+The BFF does not own the role enum. Canonical role values are defined in `contracts-and-schemas` and enforced by `microservice-users`.
 
 Operator-facing diagnostics semantics and runtime-control behavior are documented in the capability dossiers so this README can stay focused on repository ownership.
 
