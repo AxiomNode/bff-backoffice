@@ -1524,6 +1524,145 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("returns an inactive wordpass worker snapshot with the word-pass game type", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          message: "Route GET:/games/generate/worker not found",
+          error: "Not Found",
+          statusCode: 404,
+        }),
+        {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-wordpass/generation/worker",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      gameType: "word-pass",
+      worker: {
+        gameType: "word-pass",
+        active: false,
+      },
+    });
+
+    await app.close();
+  });
+
+  it("forwards generation worker snapshots when the endpoint is available upstream", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ gameType: "quiz", worker: { active: true } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-quiz/generation/worker",
+      headers: { authorization: "Bearer staff-token" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ gameType: "quiz", worker: { active: true } });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://microservice-quizz:7100/games/generate/worker");
+
+    await app.close();
+  });
+
+  it("rejects generation worker snapshots for services without runtime generation support", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-users/generation/worker",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      message: "Service 'microservice-users' does not support runtime game generation",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it("surfaces non-worker-route upstream errors for generation worker snapshots", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ message: "unexpected upstream failure" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/services/microservice-quiz/generation/worker",
+    });
+
+    expect(response.statusCode).toBe(500);
+
+    await app.close();
+  });
+
   it("forwards generation worker stop for editable game services", async () => {
     const app = Fastify();
 
@@ -1637,6 +1776,40 @@ describe("backoffice routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ message: "Invalid payload" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it("rejects generation worker start for services without runtime game generation support", async () => {
+    const app = Fastify();
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
+      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
+    }));
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/services/microservice-users/generation/worker/start",
+      payload: {
+        countPerIteration: 10,
+        categoryIds: [],
+        difficultyLevels: [],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      message: "Service 'microservice-users' does not support runtime game generation",
+    });
     expect(fetchMock).not.toHaveBeenCalled();
 
     await app.close();
@@ -3608,6 +3781,37 @@ describe("backoffice routes", () => {
       method: "DELETE",
       url: "/v1/backoffice/ai-engine/presets/missing-preset",
     });
+    const connectionUpdateInvalidPayload = await app.inject({
+      method: "PUT",
+      url: "/v1/backoffice/ai-engine/connections/this-pc-lan",
+      payload: {},
+    });
+    const connectionUpdateMissing = await app.inject({
+      method: "PUT",
+      url: "/v1/backoffice/ai-engine/connections/missing-preset",
+      payload: {
+        name: "Missing connection",
+        host: "10.0.0.30",
+        protocol: "http",
+        port: 17002,
+      },
+    });
+    const connectionActivateMissing = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/ai-engine/connections/missing-preset/activate",
+    });
+    const connectionDeleteMissing = await app.inject({
+      method: "DELETE",
+      url: "/v1/backoffice/ai-engine/connections/missing-preset",
+    });
+    const connectionDeleteExisting = await app.inject({
+      method: "DELETE",
+      url: "/v1/backoffice/ai-engine/connections/workstation-public",
+    });
+    const connectionActivateSyncFailure = await app.inject({
+      method: "POST",
+      url: "/v1/backoffice/ai-engine/connections/this-pc-lan/activate",
+    });
     const invalidTargetPut = await app.inject({
       method: "PUT",
       url: "/v1/backoffice/ai-engine/target",
@@ -3646,6 +3850,17 @@ describe("backoffice routes", () => {
     });
     expect(presetDeleteMissing.statusCode).toBe(404);
     expect(presetDeleteMissing.json()).toEqual({ message: "Preset not found" });
+    expect(connectionUpdateInvalidPayload.statusCode).toBe(400);
+    expect(connectionUpdateInvalidPayload.json()).toMatchObject({ message: "Invalid payload" });
+    expect(connectionUpdateMissing.statusCode).toBe(404);
+    expect(connectionUpdateMissing.json()).toEqual({ message: "Connection not found" });
+    expect(connectionActivateMissing.statusCode).toBe(404);
+    expect(connectionActivateMissing.json()).toEqual({ message: "Connection not found" });
+    expect(connectionDeleteMissing.statusCode).toBe(404);
+    expect(connectionDeleteMissing.json()).toEqual({ message: "Connection not found" });
+    expect(connectionDeleteExisting.statusCode).toBe(500);
+    expect(connectionActivateSyncFailure.statusCode).toBe(400);
+    expect(connectionActivateSyncFailure.json()).toMatchObject({ message: "sync failed" });
     expect(invalidTargetPut.statusCode).toBe(400);
     expect(invalidTargetPut.json()).toMatchObject({ message: "sync failed" });
     expect(invalidTargetDelete.statusCode).toBe(400);
