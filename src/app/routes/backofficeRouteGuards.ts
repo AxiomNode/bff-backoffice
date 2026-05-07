@@ -63,7 +63,7 @@ const GenerationProcessStartSchema = z.object({
   itemCount: z.coerce.number().int().min(1).max(50).optional(),
   numQuestions: z.coerce.number().int().min(1).max(50).optional(),
   letters: z.string().optional(),
-  count: z.coerce.number().int().min(1).max(100).default(10),
+  count: z.coerce.number().int().min(1).max(100).optional(),
 });
 
 const GenerationWorkerStartSchema = z.object({
