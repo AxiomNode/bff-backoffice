@@ -47,9 +47,11 @@ describe("classifyAdminAction", () => {
 
   it("captures ai-engine preset and target mutations", () => {
     const presetResult = classifyAdminAction("POST", "/v1/backoffice/ai-engine/presets");
+    const presetListResult = classifyAdminAction("GET", "/v1/backoffice/ai-engine/presets");
     const connectionResult = classifyAdminAction("POST", "/v1/backoffice/ai-engine/connections/abc/activate");
     const targetResult = classifyAdminAction("PUT", "/v1/backoffice/ai-engine/target");
     expect(presetResult.audit && presetResult.category).toBe("routing.ai-engine.preset");
+    expect(presetListResult.audit && presetListResult.category).toBe("routing.ai-engine.preset");
     expect(connectionResult.audit && connectionResult.category).toBe("routing.ai-engine.connection");
     expect(targetResult.audit && targetResult.category).toBe("routing.ai-engine.target");
   });
@@ -59,6 +61,13 @@ describe("classifyAdminAction", () => {
     const genResult = classifyAdminAction("POST", "/v1/backoffice/services/microservice-quiz/generation/process");
     expect(dataResult.audit && dataResult.category).toBe("data.mutation");
     expect(genResult.audit && genResult.category).toBe("ai.generation.start");
+  });
+
+  it("captures ai diagnostics and manual user events", () => {
+    const diagnosticsResult = classifyAdminAction("POST", "/v1/backoffice/ai-diagnostics/tests/run");
+    const manualUserEventResult = classifyAdminAction("POST", "/v1/backoffice/users/events/manual");
+    expect(diagnosticsResult.audit && diagnosticsResult.category).toBe("ai.diagnostics");
+    expect(manualUserEventResult.audit && manualUserEventResult.category).toBe("users.events.manual");
   });
 
   it("ignores reads and unknown routes", () => {
@@ -73,8 +82,16 @@ describe("resolveActor", () => {
     expect(resolveActor({ "x-firebase-uid": "uid-123" })).toBe("uid-123");
   });
 
+  it("ignores blank firebase uid headers before falling back", () => {
+    expect(resolveActor({ "x-firebase-uid": "   ", authorization: "Bearer abcdefghijKLMN" })).toBe("bearer:ghijKLMN");
+  });
+
   it("falls back to last 8 chars of bearer token", () => {
     expect(resolveActor({ authorization: "Bearer abcdefghijKLMN" })).toBe("bearer:ghijKLMN");
+  });
+
+  it("ignores bearer headers that are too short to identify safely", () => {
+    expect(resolveActor({ authorization: "Bearer abc" })).toBe("anonymous");
   });
 
   it("returns anonymous when no identity headers are present", () => {
@@ -138,6 +155,52 @@ describe("AuditTrailStore", () => {
       requestBytes: 64,
     });
     expect(await store.query()).toEqual([]);
+  });
+
+  it("returns an empty query for missing audit directories", async () => {
+    const store = new AuditTrailStore({
+      ...baseConfig,
+      AUDIT_TRAIL_DIR: path.join(dir, "missing"),
+      AUDIT_TRAIL_ENABLED: true,
+    } as never);
+
+    await expect(store.query(10)).resolves.toEqual([]);
+  });
+
+  it("skips malformed audit lines while preserving valid events", async () => {
+    const auditFile = path.join(dir, "audit-2026-05-07.jsonl");
+    await writeFile(
+      auditFile,
+      [
+        "not-json",
+        JSON.stringify({
+          ts: "2026-05-07T00:00:00.000Z",
+          correlationId: "corr-valid",
+          actor: "uid-1",
+          ip: "1.2.3.4",
+          method: "POST",
+          route: "/v1/backoffice/services/microservice-quiz/data",
+          category: "data.mutation",
+          action: "POST /v1/backoffice/services/microservice-quiz/data",
+          statusCode: 200,
+          success: true,
+          durationMs: 4,
+          requestBytes: 12,
+        }),
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const store = new AuditTrailStore({
+      ...baseConfig,
+      AUDIT_TRAIL_DIR: dir,
+      AUDIT_TRAIL_ENABLED: true,
+    } as never);
+
+    await expect(store.query(10)).resolves.toEqual([
+      expect.objectContaining({ correlationId: "corr-valid" }),
+    ]);
   });
 
   it("enforces retention by deleting files older than the configured window", async () => {

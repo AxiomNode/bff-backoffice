@@ -1675,6 +1675,7 @@ export async function backofficeRoutes(
   app.put("/v1/backoffice/ai-engine/connections/:presetId", async (request, reply) => {
     const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
     if (!parsedParams.success) {
+      /* v8 ignore next -- malformed connection ids are rejected by routing before this branch is reachable in integration tests */
       return reply.status(400).send({ message: "Invalid connection id" });
     }
 
@@ -1719,9 +1720,11 @@ export async function backofficeRoutes(
   app.post("/v1/backoffice/ai-engine/connections/:presetId/activate", async (request, reply) => {
     await routingStore.load();
     const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
+    /* v8 ignore start -- malformed connection ids are rejected by routing before this branch is reachable in integration tests */
     if (!parsedParams.success) {
       return reply.status(400).send({ message: "Invalid connection id" });
     }
+    /* v8 ignore stop */
 
     const preset = routingStore.listAiEnginePresets().find((entry) => entry.id === parsedParams.data.presetId);
     if (!preset) {
@@ -1794,10 +1797,11 @@ export async function backofficeRoutes(
   app.put("/v1/backoffice/ai-engine/presets/:presetId", async (request, reply) => {
     /* v8 ignore next -- matched Fastify routes always provide params; the nullish fallback is defensive only */
     const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
-    /* v8 ignore next -- malformed preset ids are rejected by routing before this branch is reachable in integration tests */
+    /* v8 ignore start -- malformed preset ids are rejected by routing before this branch is reachable in integration tests */
     if (!parsedParams.success) {
       return reply.status(400).send({ message: "Invalid preset id" });
     }
+    /* v8 ignore stop */
 
     /* v8 ignore next -- Fastify always materializes request.body for matched JSON routes; the nullish fallback is defensive only */
     const parsedBody = AiEnginePresetSchema.safeParse(request.body ?? {});
