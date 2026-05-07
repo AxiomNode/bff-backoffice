@@ -91,13 +91,14 @@ function normalizeGenerationProcessPayload(
   requestedBy: "backoffice";
 } {
   const itemCount = payload.itemCount ?? payload.numQuestions;
+  const count = payload.count ?? itemCount ?? 10;
   return {
     categoryId: payload.categoryId,
     ...(typeof payload.difficultyPercentage === "number"
       ? { difficultyPercentage: payload.difficultyPercentage }
       : {}),
     ...(typeof itemCount === "number" ? { itemCount } : {}),
-    count: payload.count,
+    count,
     requestedBy: "backoffice",
   };
 }

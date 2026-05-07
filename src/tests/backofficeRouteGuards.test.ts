@@ -355,7 +355,6 @@ describe("backofficeRouteGuards", () => {
       payload: {
         categoryId: "11",
         numQuestions: 6,
-        count: 10,
       },
     });
     expect(invalidProcesses.statusCode).toBe(400);

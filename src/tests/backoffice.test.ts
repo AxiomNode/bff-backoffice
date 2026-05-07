@@ -712,7 +712,6 @@ describe("backoffice routes", () => {
         categoryId: "11",
         difficultyPercentage: 55,
         itemCount: 4,
-        count: 8,
       },
     });
 
@@ -725,7 +724,7 @@ describe("backoffice routes", () => {
           categoryId: "11",
           difficultyPercentage: 55,
           itemCount: 4,
-          count: 8,
+          count: 4,
           requestedBy: "backoffice",
         }),
       }),
