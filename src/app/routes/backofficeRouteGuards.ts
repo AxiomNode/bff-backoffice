@@ -31,7 +31,7 @@ const DataMutationSchema = z.object({
   dataset: z.literal("history"),
   categoryId: z.string().min(1),
   difficultyPercentage: z.coerce.number().int().min(0).max(100),
-  content: z.record(z.unknown()).refine((value) => Object.keys(value).length > 0, {
+  content: z.record(z.string(), z.unknown()).refine((value) => Object.keys(value).length > 0, {
     message: "content must include at least one field",
   }),
   status: z.enum(["manual", "validated", "pending_review"]).default("manual"),
@@ -41,7 +41,7 @@ const DataUpdateSchema = z.object({
   dataset: z.literal("history"),
   categoryId: z.string().min(1).optional(),
   difficultyPercentage: z.coerce.number().int().min(0).max(100).optional(),
-  content: z.record(z.unknown()).refine((value) => Object.keys(value).length > 0, {
+  content: z.record(z.string(), z.unknown()).refine((value) => Object.keys(value).length > 0, {
     message: "content must include at least one field",
   }).optional(),
   status: z.enum(["manual", "validated", "pending_review"]).optional(),
