@@ -3838,7 +3838,8 @@ describe("backoffice routes", () => {
     });
     expect(presetUpdateMissing.statusCode).toBe(404);
     expect(presetUpdateMissing.json()).toEqual({ message: "Preset not found" });
-    expect(invalidPresetUpdateId.statusCode).toBe(404);
+    // Fastify 5.12 answers 414 (URI Too Long) when a path parameter exceeds maxParamLength.
+    expect(invalidPresetUpdateId.statusCode).toBe(414);
     expect(presetUpdateInvalidHost.statusCode).toBe(400);
     expect(presetUpdateInvalidHost.json()).toMatchObject({
       message: "host must be a valid hostname or IPv4 address",

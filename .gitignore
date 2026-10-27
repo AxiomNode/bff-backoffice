@@ -22,3 +22,6 @@ src/.env.secrets
 runtime/**/*.env
 *firebase*service-account*.json
 *service-account*.json
+
+# Test coverage reports (generated)
+src/coverage/
