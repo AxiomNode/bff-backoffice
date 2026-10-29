@@ -11,7 +11,9 @@ export default defineConfig({
         lines: 90,
         statements: 90,
         functions: 90,
-        branches: 88,
+        // Vitest 4 (AST-aware v8 remapping) counts ~8% more branches than 2.x for the
+        // same tests (91 -> 85.6%). Lowered from 88 until route branch tests are added.
+        branches: 85,
       },
     },
   },
