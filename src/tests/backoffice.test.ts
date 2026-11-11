@@ -3468,25 +3468,9 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
-  it("allows ai-engine target overrides outside the generic allowlist", async () => {
+  it("denies ai-engine target overrides outside the allowlist", async () => {
     const app = Fastify();
-
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
-      new Response(JSON.stringify({
-        source: "override",
-        label: null,
-        host: "example.com",
-        protocol: "http",
-        port: 17002,
-        llamaBaseUrl: "http://example.com:17002/v1/completions",
-        envLlamaBaseUrl: "http://llama-workstation.invalid:7002/v1/completions",
-        updatedAt: "2026-04-19T00:00:00.000Z",
-      }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    ));
-
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     await backofficeRoutes(app, withStateFile({
@@ -3502,29 +3486,14 @@ describe("backoffice routes", () => {
     const response = await app.inject({
       method: "PUT",
       url: "/v1/backoffice/ai-engine/target",
-      payload: {
-        host: "example.com",
-        port: 17002,
-      },
+      payload: { host: "example.com", port: 17002 },
     });
 
-    expect(response.statusCode).toBe(200);
+    expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({
-      source: "override",
-      host: "example.com",
-      llamaBaseUrl: "http://example.com:17002/v1/completions",
+      message: "host 'example.com' is not allowed by ALLOWED_ROUTING_TARGET_HOSTS",
     });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://ai-engine-api:7001/internal/admin/llama-target",
-      expect.objectContaining({
-        method: "PUT",
-        body: JSON.stringify({
-          host: "example.com",
-          protocol: "http",
-          port: 17002,
-        }),
-      }),
-    );
+    expect(fetchMock).not.toHaveBeenCalled();
 
     await app.close();
   });
@@ -3895,7 +3864,7 @@ describe("backoffice routes", () => {
       total: 2,
       presets: expect.arrayContaining([
         expect.objectContaining({ id: "this-pc-lan", host: "192.168.0.14" }),
-        expect.objectContaining({ id: "workstation-public", host: "195.35.48.40" }),
+        expect.objectContaining({ id: "workstation-public", host: "203.0.113.10" }),
       ]),
     });
 
@@ -3990,7 +3959,7 @@ describe("backoffice routes", () => {
           {
             id: "legacy-relay",
             name: "Legacy relay",
-            host: "195.35.48.40",
+            host: "203.0.113.10",
             protocol: "http",
             apiPort: 27001,
             statsPort: 27000,
@@ -4007,7 +3976,7 @@ describe("backoffice routes", () => {
     expect(store.listAiEnginePresets()).toEqual([
       expect.objectContaining({
         id: "legacy-relay",
-        host: "195.35.48.40",
+        host: "203.0.113.10",
         port: 27001,
       }),
     ]);

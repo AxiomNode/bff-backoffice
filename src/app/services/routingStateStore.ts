@@ -56,8 +56,8 @@ const DEFAULT_AI_ENGINE_PRESETS: PersistedAiEnginePreset[] = [
   },
   {
     id: "workstation-public",
-    name: "Workstation publica (195.35.48.40)",
-    host: "195.35.48.40",
+    name: "Workstation publica (203.0.113.10)",
+    host: "203.0.113.10",
     protocol: "http",
     port: 7002,
     updatedAt: "2026-04-19T00:00:00.000Z",

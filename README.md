@@ -116,9 +116,9 @@ CI, image publication, and staging rollout behavior are documented in `docs/oper
 
 ### Routing and security notes
 
-- Generic service-target overrides remain subject to `ALLOWED_ROUTING_TARGET_HOSTS`.
-- The dedicated ai-engine target route stays intentionally more permissive so operations can move the engine to an external reachable host when required.
-- `API_GATEWAY_ADMIN_TOKEN` can protect the gateway synchronization path.
+- Every routing target that is saved or applied (generic service-target overrides, ai-engine target, ai-engine presets and connections) is checked against `ALLOWED_ROUTING_TARGET_HOSTS` (hostnames, `*.suffix` wildcards, IPv4 CIDRs). Targets must use `http` or `https`.
+- Fail closed: when `ALLOWED_ROUTING_TARGET_HOSTS` is empty, overrides are denied unless `NODE_ENV` is `development` or `test` (where the service logs a warning at startup). Built-in seeded ai-engine presets still load. To point the ai-engine at an external host, add that host to the allowlist.
+- `API_GATEWAY_ADMIN_TOKEN` is declared in the configuration schema but is not currently read by any route.
 
 ### Runtime routing overrides
 
