@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - develop
   pull_request:
   workflow_dispatch:
 
@@ -14,12 +13,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-test-lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,7 +54,7 @@ jobs:
           fi
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: bff-backoffice/src/package-lock.json
       - name: Build shared SDK package
@@ -79,6 +83,7 @@ jobs:
   trigger-platform-infra-build:
     name: Trigger Platform Infra Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs:
       - build-test-lint
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
