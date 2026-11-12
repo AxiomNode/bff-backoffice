@@ -111,3 +111,11 @@ export type AppConfig = Omit<
 export function loadConfig(): AppConfig {
   return envSchema.parse(process.env);
 }
+
+/**
+ * True only for local development and test runs. Anything else (including an
+ * unset NODE_ENV) is treated as production so security controls fail closed.
+ */
+export function isDevelopmentLikeEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV === "development" || env.NODE_ENV === "test";
+}

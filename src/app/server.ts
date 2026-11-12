@@ -9,7 +9,7 @@ import {
   configureHttpAgent,
 } from "@axiomnode/shared-sdk-client/proxy";
 
-import { loadConfig } from "./config.js";
+import { isDevelopmentLikeEnv, loadConfig } from "./config.js";
 import { backofficeRoutes } from "./routes/backoffice.js";
 import { healthRoutes } from "./routes/health.js";
 import { monitoringRoutes } from "./routes/monitoring.js";
@@ -23,6 +23,13 @@ configureHttpAgent();
 export async function buildServer() {
   const config = loadConfig();
   const app = Fastify({ logger: true });
+  if (!config.ALLOWED_ROUTING_TARGET_HOSTS?.trim()) {
+    app.log.warn(
+      isDevelopmentLikeEnv()
+        ? "ALLOWED_ROUTING_TARGET_HOSTS is empty: routing targets are unrestricted (development/test only)"
+        : "ALLOWED_ROUTING_TARGET_HOSTS is empty: routing target overrides will be denied until it is set",
+    );
+  }
   const metrics = new ServiceMetrics(config);
   const auditTrail = new AuditTrailStore(config);
 

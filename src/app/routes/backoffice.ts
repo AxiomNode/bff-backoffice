@@ -9,7 +9,7 @@ import {
 } from "@axiomnode/shared-sdk-client/proxy";
 import { z } from "zod";
 
-import type { AppConfig } from "../config.js";
+import { isDevelopmentLikeEnv, type AppConfig } from "../config.js";
 import { fetchKubernetesOverview } from "../services/kubernetesObservability.js";
 import { ServiceMetrics } from "../services/serviceMetrics.js";
 import {
@@ -402,7 +402,8 @@ function isIpv4InCidr(host: string, cidr: string): boolean {
 function isAllowedRoutingTargetHost(config: AppConfig, host: string): boolean {
   const policy = config.ALLOWED_ROUTING_TARGET_HOSTS?.trim();
   if (!policy) {
-    return true;
+    // Fail closed: only development/test may run without an allowlist.
+    return isDevelopmentLikeEnv();
   }
 
   const normalizedHost = host.trim().toLowerCase();
@@ -426,7 +427,10 @@ function isAllowedRoutingTargetHost(config: AppConfig, host: string): boolean {
 
 function assertAllowedRoutingTargetHost(config: AppConfig, host: string): void {
   if (!isAllowedRoutingTargetHost(config, host)) {
-    throw new Error(`host '${host}' is not allowed by ALLOWED_ROUTING_TARGET_HOSTS`);
+    const reason = config.ALLOWED_ROUTING_TARGET_HOSTS?.trim()
+      ? `host '${host}' is not allowed by ALLOWED_ROUTING_TARGET_HOSTS`
+      : `host '${host}' is not allowed: ALLOWED_ROUTING_TARGET_HOSTS is empty and overrides are denied outside development`;
+    throw new Error(reason);
   }
 }
 
@@ -695,11 +699,13 @@ async function resetServiceRuntimeTarget(routingStore: RoutingStateStore, servic
 }
 
 async function saveAiEnginePreset(
+  config: AppConfig,
   routingStore: RoutingStateStore,
   presetId: string,
   input: z.infer<typeof AiEnginePresetSchema>,
 ): Promise<PersistedAiEnginePreset> {
   const normalized = normalizeAiEnginePresetInput(input);
+  assertAllowedRoutingTargetHost(config, normalized.host);
   const preset: PersistedAiEnginePreset = {
     id: presetId,
     name: normalized.name.trim(),
@@ -827,6 +833,10 @@ async function syncAiEngineLlamaTarget(
   method: "PUT" | "DELETE",
   body?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  if (method === "PUT" && typeof body?.host === "string") {
+    assertAllowedRoutingTargetHost(config, body.host);
+  }
+
   const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/internal/admin/llama-target", {});
   const headers: Record<string, string> = {};
 
@@ -1664,7 +1674,7 @@ export async function backofficeRoutes(
     }
 
     try {
-      await saveAiEnginePreset(routingStore, randomUUID(), parsed.data);
+      await saveAiEnginePreset(config, routingStore, randomUUID(), parsed.data);
       return reply.status(201).send(await getAiEngineConnectionState(config, routingStore));
     } catch (error) {
       return reply.status(400).send({
@@ -1695,7 +1705,7 @@ export async function backofficeRoutes(
     }
 
     try {
-      await saveAiEnginePreset(routingStore, parsedParams.data.presetId, parsedBody.data);
+      await saveAiEnginePreset(config, routingStore, parsedParams.data.presetId, parsedBody.data);
       return reply.send(await getAiEngineConnectionState(config, routingStore));
     } catch (error) {
       return reply.status(400).send({
@@ -1785,7 +1795,7 @@ export async function backofficeRoutes(
     }
 
     try {
-      const preset = await saveAiEnginePreset(routingStore, randomUUID(), parsed.data);
+      const preset = await saveAiEnginePreset(config, routingStore, randomUUID(), parsed.data);
       return reply.status(201).send(getAiEnginePresetPayload(preset));
     } catch (error) {
       return reply.status(400).send({
@@ -1820,7 +1830,7 @@ export async function backofficeRoutes(
     }
 
     try {
-      const preset = await saveAiEnginePreset(routingStore, parsedParams.data.presetId, parsedBody.data);
+      const preset = await saveAiEnginePreset(config, routingStore, parsedParams.data.presetId, parsedBody.data);
       return reply.send(getAiEnginePresetPayload(preset));
     } catch (error) {
       return reply.status(400).send({
