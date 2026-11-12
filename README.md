@@ -105,7 +105,7 @@ Primary downstream dependencies:
 
 ### CI/CD and rollout note
 
-CI, image publication, and staging rollout behavior are documented in `docs/operations/README.md` and `../docs/operations/cicd-workflow-map.md`.
+CI and image publication are documented in `docs/operations/README.md` and `../docs/operations/cicd-workflow-map.md`.
 
 ### Internal dependencies
 
