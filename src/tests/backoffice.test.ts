@@ -784,7 +784,7 @@ describe("backoffice routes", () => {
   it("forwards all optional quiz history filters to the upstream query", async () => {
     const app = Fastify();
 
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.fn().mockImplementation(async () =>
       new Response(JSON.stringify({ items: [{ id: "q-1" }], total: 1, page: 1, pageSize: 20 }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -962,7 +962,7 @@ describe("backoffice routes", () => {
   it("forwards all optional wordpass history filters to the upstream query", async () => {
     const app = Fastify();
 
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.fn().mockImplementation(async () =>
       new Response(JSON.stringify({ items: [{ id: "w-1" }], total: 1, page: 1, pageSize: 20 }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -1072,7 +1072,7 @@ describe("backoffice routes", () => {
   it("filters and sorts history rows in the BFF when upstream paging metadata is not usable", async () => {
     const app = Fastify();
 
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.fn().mockImplementation(async () =>
       new Response(JSON.stringify({
         items: [
           { id: "1", score: "8", active: true, meta: { level: "alpha" } },
