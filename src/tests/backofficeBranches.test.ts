@@ -1,13 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import Fastify, { type FastifyInstance } from "fastify";
-
-vi.mock("../app/services/kubernetesObservability.js", () => ({
-  fetchKubernetesOverview: vi.fn(),
-}));
 
 import { backofficeRoutes } from "../app/routes/backoffice.js";
 import type { AppConfig } from "../app/config.js";
@@ -27,7 +20,6 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-let stateDir = "";
 let app: FastifyInstance;
 const apps: FastifyInstance[] = [];
 
@@ -42,7 +34,6 @@ function baseConfig(overrides: Record<string, unknown> = {}): AppConfig {
     AI_ENGINE_API_URL: AI_API,
     AI_ENGINE_STATS_URL: AI_STATS,
     UPSTREAM_METRICS_CACHE_TTL_MS: 0,
-    BACKOFFICE_ROUTING_STATE_FILE: path.join(stateDir, "routing-state.json"),
     ...overrides,
   } as unknown as AppConfig;
 }
@@ -70,16 +61,11 @@ async function boot(overrides: Record<string, unknown> = {}): Promise<FastifyIns
   return app;
 }
 
-beforeEach(async () => {
-  stateDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-branches-"));
-});
-
 afterEach(async () => {
   vi.unstubAllGlobals();
   while (apps.length > 0) {
     await apps.pop()?.close();
   }
-  await rm(stateDir, { recursive: true, force: true });
 });
 
 describe("operational summary", () => {
@@ -655,186 +641,6 @@ describe("ai-engine runtime target", () => {
       expect(response.json().message).toBe("host must be a valid hostname or IPv4 address");
     }
     expect(mock).not.toHaveBeenCalled();
-  });
-});
-
-describe("ai-engine connections", () => {
-  async function createConnection(name: string, host = "gpu.lab", port = 7002): Promise<string> {
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/connections",
-      payload: { name, host, protocol: "http", port },
-    });
-    expect(response.statusCode).toBe(201);
-    const created = (response.json().connections as Array<{ id: string; name: string }>).find((c) => c.name === name);
-    return created!.id;
-  }
-
-  it("marks the matching connection active, tolerating unknown protocols and incomplete targets", async () => {
-    let target: Record<string, unknown> = { host: "other.lab", protocol: "http", port: 1 };
-    stubFetch((url) => (url === `${AI_API}/internal/admin/llama-target` ? json(target) : undefined));
-    await boot();
-    const id = await createConnection("Lab");
-
-    const list = async () => (await app.inject({ method: "GET", url: "/v1/backoffice/ai-engine/connections" })).json();
-
-    expect((await list()).activeConnectionId).toBeNull();
-
-    // unknown protocol values are treated as http
-    target = { host: "gpu.lab", protocol: "gopher", port: 7002 };
-    expect((await list()).activeConnectionId).toBe(id);
-
-    // protocol that is explicitly https no longer matches an http connection
-    target = { host: "gpu.lab", protocol: "https", port: 7002 };
-    expect((await list()).activeConnectionId).toBeNull();
-
-    // a target without a numeric port or a host cannot be matched
-    target = { host: "gpu.lab", protocol: "http", port: "7002" };
-    expect((await list()).activeConnectionId).toBeNull();
-    target = { protocol: "http", port: 7002 };
-    expect((await list()).activeConnectionId).toBeNull();
-  });
-
-  it("rejects connections with invalid hosts and unknown ids", async () => {
-    stubFetch((url) => (url === `${AI_API}/internal/admin/llama-target` ? json({}) : undefined));
-    await boot();
-    const id = await createConnection("Lab");
-
-    const created = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/connections",
-      payload: { name: "Bad", host: "bad host!" },
-    });
-    expect(created.statusCode).toBe(400);
-    expect(created.json().message).toBe("host must be a valid hostname or IPv4 address");
-
-    const updated = await app.inject({
-      method: "PUT",
-      url: `/v1/backoffice/ai-engine/connections/${id}`,
-      payload: { name: "Lab", host: "bad host!" },
-    });
-    expect(updated.statusCode).toBe(400);
-
-    const missing = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/ai-engine/connections/does-not-exist",
-      payload: { name: "Lab", host: "gpu.lab" },
-    });
-    expect(missing.statusCode).toBe(404);
-    expect(missing.json()).toEqual({ message: "Connection not found" });
-
-    const invalidBody = await app.inject({
-      method: "PUT",
-      url: `/v1/backoffice/ai-engine/connections/${id}`,
-      payload: { name: "" },
-    });
-    expect(invalidBody.statusCode).toBe(400);
-    expect(invalidBody.json().message).toBe("Invalid payload");
-
-    const blankDelete = await app.inject({ method: "DELETE", url: "/v1/backoffice/ai-engine/connections/%20" });
-    expect(blankDelete.statusCode).toBe(400);
-    expect(blankDelete.json()).toEqual({ message: "Invalid connection id" });
-
-    const missingDelete = await app.inject({ method: "DELETE", url: "/v1/backoffice/ai-engine/connections/nope" });
-    expect(missingDelete.statusCode).toBe(404);
-
-    const missingActivate = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/connections/nope/activate",
-    });
-    expect(missingActivate.statusCode).toBe(404);
-    expect(missingActivate.json()).toEqual({ message: "Connection not found" });
-  });
-
-  it("updates and deletes a saved connection", async () => {
-    stubFetch((url) => (url === `${AI_API}/internal/admin/llama-target` ? json({}) : undefined));
-    await boot();
-    const id = await createConnection("Lab");
-
-    const updated = await app.inject({
-      method: "PUT",
-      url: `/v1/backoffice/ai-engine/connections/${id}`,
-      payload: { name: "Lab v2", host: "gpu2.lab", port: 9000 },
-    });
-    expect(updated.statusCode).toBe(200);
-    expect(updated.json().connections).toContainEqual(
-      expect.objectContaining({ id, name: "Lab v2", host: "gpu2.lab", port: 9000, active: false }),
-    );
-
-    const deleted = await app.inject({ method: "DELETE", url: `/v1/backoffice/ai-engine/connections/${id}` });
-    expect(deleted.statusCode).toBe(200);
-    expect(deleted.json().connections.some((entry: { id: string }) => entry.id === id)).toBe(false);
-  });
-
-  it("reports a failed activation without changing the active connection", async () => {
-    stubFetch((url, init) => {
-      if (url !== `${AI_API}/internal/admin/llama-target`) return undefined;
-      return init?.method === "PUT" ? new Response("llama unreachable", { status: 502 }) : json({});
-    });
-    await boot();
-    const id = await createConnection("Lab");
-
-    const response = await app.inject({
-      method: "POST",
-      url: `/v1/backoffice/ai-engine/connections/${id}/activate`,
-    });
-    expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ message: "llama unreachable" });
-  });
-
-  it("validates preset payloads, ids and hosts", async () => {
-    stubFetch(() => json({}));
-    await boot();
-
-    const created = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/presets",
-      payload: { name: "Lab", host: "gpu.lab" },
-    });
-    expect(created.statusCode).toBe(201);
-    const presetId = created.json().id as string;
-
-    const badCreate = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/presets",
-      payload: { name: "Bad", host: "no good" },
-    });
-    expect(badCreate.statusCode).toBe(400);
-    expect(badCreate.json().message).toBe("host must be a valid hostname or IPv4 address");
-
-    const badUpdate = await app.inject({
-      method: "PUT",
-      url: `/v1/backoffice/ai-engine/presets/${presetId}`,
-      payload: { name: "Lab", host: "no good" },
-    });
-    expect(badUpdate.statusCode).toBe(400);
-
-    const invalidPayload = await app.inject({
-      method: "PUT",
-      url: `/v1/backoffice/ai-engine/presets/${presetId}`,
-      payload: { host: "gpu.lab" },
-    });
-    expect(invalidPayload.statusCode).toBe(400);
-    expect(invalidPayload.json().message).toBe("Invalid payload");
-
-    const missingUpdate = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/ai-engine/presets/ghost",
-      payload: { name: "Ghost", host: "gpu.lab" },
-    });
-    expect(missingUpdate.statusCode).toBe(404);
-    expect(missingUpdate.json()).toEqual({ message: "Preset not found" });
-
-    const blankDelete = await app.inject({ method: "DELETE", url: "/v1/backoffice/ai-engine/presets/%20" });
-    expect(blankDelete.statusCode).toBe(400);
-    expect(blankDelete.json()).toEqual({ message: "Invalid preset id" });
-
-    const invalidCreate = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/presets",
-      payload: { name: "" },
-    });
-    expect(invalidCreate.statusCode).toBe(400);
   });
 });
 

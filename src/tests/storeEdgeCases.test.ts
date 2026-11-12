@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 
 import { AuditTrailStore, resolveActor } from "../app/services/auditTrailStore.js";
-import { RoutingStateStore } from "../app/services/routingStateStore.js";
 
 let dir = "";
 let previousCwd = "";
@@ -65,39 +64,5 @@ describe("AuditTrailStore edge cases", () => {
     expect(resolveActor({ authorization: "Bearer 0123456789abcdef" })).toBe("bearer:89abcdef");
     expect(resolveActor({ authorization: "Bearer x" })).toBe("anonymous");
     expect(resolveActor({})).toBe("anonymous");
-  });
-});
-
-describe("RoutingStateStore edge cases", () => {
-  it("uses the default runtime path when no state file is configured", async () => {
-    process.chdir(dir);
-    const store = new RoutingStateStore({} as never);
-    await store.load();
-    expect(store.list()).toEqual({});
-    expect(await store.listHistory()).toEqual([]);
-  });
-
-  it("normalises history limits and ignores invalid history entries", async () => {
-    const stateFile = path.join(dir, "state.json");
-    const store = new RoutingStateStore({ BACKOFFICE_ROUTING_STATE_FILE: stateFile } as never);
-    const lines = [
-      JSON.stringify({ recordedAt: "2026-01-01T00:00:00Z", action: "service-target-set", service: "mobile", presetId: "p1", state: {} }),
-      JSON.stringify({ recordedAt: "2026-01-02T00:00:00Z", action: "ai-engine-preset-delete", service: 7, presetId: 3, state: null }),
-      JSON.stringify({ recordedAt: 1, action: "service-target-set", state: {} }),
-      JSON.stringify({ recordedAt: "2026-01-03T00:00:00Z", action: "unknown", state: {} }),
-      JSON.stringify("scalar"),
-      "",
-    ];
-    await writeFile(path.join(dir, "state.history.jsonl"), lines.join("\n"), "utf8");
-
-    const all = await store.listHistory(1.5);
-    expect(all).toHaveLength(2);
-    expect(all[0].action).toBe("ai-engine-preset-delete");
-    expect(all[0].service).toBeUndefined();
-    expect(all[0].presetId).toBeUndefined();
-    expect(all[1].service).toBe("mobile");
-    expect(all[1].presetId).toBe("p1");
-    expect(await store.listHistory(0)).toHaveLength(1);
-    expect(await store.listHistory(5000)).toHaveLength(2);
   });
 });

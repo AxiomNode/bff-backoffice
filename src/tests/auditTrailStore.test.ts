@@ -40,19 +40,8 @@ describe("classifyAdminAction", () => {
     });
   });
 
-  it("captures routing target overrides", () => {
-    expect(classifyAdminAction("PUT", "/v1/backoffice/service-targets/api-gateway").audit).toBe(true);
-    expect(classifyAdminAction("DELETE", "/v1/backoffice/service-targets/api-gateway").audit).toBe(true);
-  });
-
-  it("captures ai-engine preset and target mutations", () => {
-    const presetResult = classifyAdminAction("POST", "/v1/backoffice/ai-engine/presets");
-    const presetListResult = classifyAdminAction("GET", "/v1/backoffice/ai-engine/presets");
-    const connectionResult = classifyAdminAction("POST", "/v1/backoffice/ai-engine/connections/abc/activate");
+  it("captures ai-engine target mutations", () => {
     const targetResult = classifyAdminAction("PUT", "/v1/backoffice/ai-engine/target");
-    expect(presetResult.audit && presetResult.category).toBe("routing.ai-engine.preset");
-    expect(presetListResult.audit && presetListResult.category).toBe("routing.ai-engine.preset");
-    expect(connectionResult.audit && connectionResult.category).toBe("routing.ai-engine.connection");
     expect(targetResult.audit && targetResult.category).toBe("routing.ai-engine.target");
   });
 
@@ -220,11 +209,11 @@ describe("AuditTrailStore", () => {
       correlationId: "corr-now",
       actor: "uid-x",
       ip: "0.0.0.0",
-      method: "POST",
-      route: "/v1/backoffice/ai-engine/presets",
-      category: "routing.ai-engine.preset",
-      action: "POST /v1/backoffice/ai-engine/presets",
-      statusCode: 201,
+      method: "PUT",
+      route: "/v1/backoffice/ai-engine/target",
+      category: "routing.ai-engine.target",
+      action: "PUT /v1/backoffice/ai-engine/target",
+      statusCode: 200,
       durationMs: 10,
       requestBytes: 16,
     });

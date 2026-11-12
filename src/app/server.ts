@@ -26,8 +26,8 @@ export async function buildServer() {
   if (!config.ALLOWED_ROUTING_TARGET_HOSTS?.trim()) {
     app.log.warn(
       isDevelopmentLikeEnv()
-        ? "ALLOWED_ROUTING_TARGET_HOSTS is empty: routing targets are unrestricted (development/test only)"
-        : "ALLOWED_ROUTING_TARGET_HOSTS is empty: routing target overrides will be denied until it is set",
+        ? "ALLOWED_ROUTING_TARGET_HOSTS is empty: ai-engine target changes are unrestricted (development/test only)"
+        : "ALLOWED_ROUTING_TARGET_HOSTS is empty: ai-engine target changes will be denied until it is set",
     );
   }
   const metrics = new ServiceMetrics(config);

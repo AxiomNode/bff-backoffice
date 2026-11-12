@@ -12,15 +12,6 @@ export type ServiceKey =
   | "ai-engine-stats"
   | "ai-engine-api";
 
-export type ConfigurableServiceTargetKey =
-  | "api-gateway"
-  | "bff-mobile"
-  | "microservice-users"
-  | "microservice-quiz"
-  | "microservice-wordpass"
-  | "ai-engine-stats"
-  | "ai-engine-api";
-
 export type EditableGameService = "microservice-quiz" | "microservice-wordpass";
 
 const DataDeleteQuerySchema = z.object({
@@ -97,26 +88,6 @@ export const ServiceKeySchema = z.enum([
   "ai-engine-api",
 ]);
 
-export const ConfigurableServiceTargetKeySchema = z.enum([
-  "api-gateway",
-  "bff-mobile",
-  "microservice-users",
-  "microservice-quiz",
-  "microservice-wordpass",
-  "ai-engine-stats",
-  "ai-engine-api",
-]);
-
-export const CONFIGURABLE_SERVICE_TARGET_KEYS: ConfigurableServiceTargetKey[] = [
-  "api-gateway",
-  "bff-mobile",
-  "microservice-users",
-  "microservice-quiz",
-  "microservice-wordpass",
-  "ai-engine-stats",
-  "ai-engine-api",
-];
-
 export function isEditableGameService(service: ServiceKey): service is EditableGameService {
   return service === "microservice-quiz" || service === "microservice-wordpass";
 }
@@ -125,19 +96,6 @@ export function getServiceKeyOrReply(reply: FastifyReply, rawService: unknown): 
   const parsed = ServiceKeySchema.safeParse(rawService);
   if (!parsed.success) {
     reply.status(400).send({ message: "Invalid service" });
-    return null;
-  }
-
-  return parsed.data;
-}
-
-export function getConfigurableServiceTargetKeyOrReply(
-  reply: FastifyReply,
-  rawService: unknown,
-): ConfigurableServiceTargetKey | null {
-  const parsed = ConfigurableServiceTargetKeySchema.safeParse(rawService);
-  if (!parsed.success) {
-    reply.status(400).send({ message: "Invalid configurable service" });
     return null;
   }
 

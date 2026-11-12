@@ -31,8 +31,6 @@ describe("loadConfig", () => {
       API_GATEWAY_URL: "http://localhost:7005",
       AI_ENGINE_STATS_URL: "http://localhost:7000",
       AI_ENGINE_API_URL: "http://localhost:7001",
-      KUBERNETES_REQUEST_TIMEOUT_MS: 5000,
-      KUBERNETES_OBSERVABILITY_ENABLED: true,
       UPSTREAM_TIMEOUT_MS: 15000,
       UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS: 3000,
       AI_ENGINE_ADMIN_TIMEOUT_MS: 10000,
@@ -52,18 +50,5 @@ describe("loadConfig", () => {
     vi.stubEnv("USERS_SERVICE_URL", "not-a-url");
 
     expect(() => loadConfig()).toThrow();
-  });
-
-  it("parses optional kubernetes flags", () => {
-    for (const [key, value] of Object.entries(REQUIRED_ENV)) {
-      vi.stubEnv(key, value);
-    }
-    vi.stubEnv("KUBERNETES_OBSERVABILITY_ENABLED", "false");
-    vi.stubEnv("KUBERNETES_REQUEST_TIMEOUT_MS", "8000");
-
-    const config = loadConfig();
-
-    expect(config.KUBERNETES_OBSERVABILITY_ENABLED).toBe(false);
-    expect(config.KUBERNETES_REQUEST_TIMEOUT_MS).toBe(8000);
   });
 });
