@@ -15,7 +15,7 @@ Backoffice BFF that aggregates internal services into admin-friendly endpoints.
 
 ## CI/CD notes
 - Push to main dispatches platform-infra build-push with service=bff-backoffice.
-- Platform-infra handles rollout to dev.
+- Deployment is manual-only via the platform-infra `deploy.yaml` workflow (the k3s staging host no longer exists, nothing auto-deploys).
 
 ## LLM editing rules
 - Keep BFF orchestration logic separate from domain services.
