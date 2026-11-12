@@ -1046,35 +1046,43 @@ function pickDeficitEntries<T extends { count: number; percentage: number }>(ent
   return [entries[entries.length - 1]].filter(Boolean) as T[];
 }
 
-function buildHistoryDatasetInsights(rows: Row[]): HistoryDatasetInsights | null {
-  const sampleSize = rows.length;
-  if (sampleSize === 0) {
+type HistoryCategoryBucket = { id: string; name: string; count: number };
+
+/** Adds `weight` rows of one category to the buckets (case-insensitive id, first non-trivial name wins). */
+function addToCategoryBucket(
+  buckets: Map<string, HistoryCategoryBucket>,
+  rawId: unknown,
+  rawName: unknown,
+  weight: number,
+): void {
+  const categoryId = pickString(rawId) || "unknown";
+  const categoryName = pickString(rawName) || categoryId;
+  const categoryKey = categoryId.toLowerCase();
+  const currentCategory = buckets.get(categoryKey);
+
+  if (currentCategory) {
+    currentCategory.count += weight;
+    if (!currentCategory.name || currentCategory.name === currentCategory.id) {
+      currentCategory.name = categoryName;
+    }
+  } else {
+    buckets.set(categoryKey, {
+      id: categoryId,
+      name: categoryName,
+      count: weight,
+    });
+  }
+}
+
+function finalizeHistoryInsights(
+  buckets: Map<string, HistoryCategoryBucket>,
+  sampleSize: number,
+): HistoryDatasetInsights | null {
+  if (sampleSize <= 0) {
     return null;
   }
 
-  const categoryBuckets = new Map<string, { id: string; name: string; count: number }>();
-
-  for (const row of rows) {
-    const categoryId = pickString(row.categoryId) || "unknown";
-    const categoryName = pickString(row.categoryName) || categoryId;
-    const categoryKey = categoryId.toLowerCase();
-    const currentCategory = categoryBuckets.get(categoryKey);
-
-    if (currentCategory) {
-      currentCategory.count += 1;
-      if (!currentCategory.name || currentCategory.name === currentCategory.id) {
-        currentCategory.name = categoryName;
-      }
-    } else {
-      categoryBuckets.set(categoryKey, {
-        id: categoryId,
-        name: categoryName,
-        count: 1,
-      });
-    }
-  }
-
-  const categories = [...categoryBuckets.values()]
+  const categories = [...buckets.values()]
     .map((entry) => ({
       ...entry,
       percentage: toPercentage(entry.count, sampleSize),
@@ -1091,6 +1099,52 @@ function buildHistoryDatasetInsights(rows: Row[]): HistoryDatasetInsights | null
     categories,
     deficitCategories: pickDeficitEntries(categories),
   };
+}
+
+function buildHistoryDatasetInsights(rows: Row[]): HistoryDatasetInsights | null {
+  const buckets = new Map<string, HistoryCategoryBucket>();
+  for (const row of rows) {
+    addToCategoryBucket(buckets, row.categoryId, row.categoryName, 1);
+  }
+  return finalizeHistoryInsights(buckets, rows.length);
+}
+
+/** One server-side GROUP BY bucket of `GET /games/history/insights`. */
+type HistoryInsightsGroup = { categoryId: unknown; categoryName: unknown; count: number };
+
+/** Builds the same insights as {@link buildHistoryDatasetInsights} from pre-aggregated buckets (newest first). */
+function buildHistoryDatasetInsightsFromGroups(groups: HistoryInsightsGroup[]): HistoryDatasetInsights | null {
+  const buckets = new Map<string, HistoryCategoryBucket>();
+  let sampleSize = 0;
+  for (const group of groups) {
+    addToCategoryBucket(buckets, group.categoryId, group.categoryName, group.count);
+    sampleSize += group.count;
+  }
+  return finalizeHistoryInsights(buckets, sampleSize);
+}
+
+/** Validates the upstream aggregate; `undefined` means "not the expected shape". */
+function parseHistoryInsightsPayload(payload: unknown): HistoryInsightsGroup[] | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+  const categories = (payload as { categories?: unknown }).categories;
+  if (!Array.isArray(categories)) {
+    return undefined;
+  }
+
+  const groups: HistoryInsightsGroup[] = [];
+  for (const entry of categories) {
+    if (!entry || typeof entry !== "object") {
+      return undefined;
+    }
+    const { categoryId, categoryName, count } = entry as Record<string, unknown>;
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
+      return undefined;
+    }
+    groups.push({ categoryId, categoryName, count });
+  }
+  return groups;
 }
 
 function serviceBaseUrl(config: AppConfig, routingStore: RoutingStateStore, service: ServiceKey): string {
@@ -1383,6 +1437,67 @@ async function readDatasetRows(
   throw new Error(`Dataset '${dataset}' not supported for ${service}`);
 }
 
+/** How long a service that answered 404 to the insights aggregate is not probed again (older deployments). */
+const HISTORY_INSIGHTS_UNSUPPORTED_TTL_MS = 5 * 60_000;
+
+/**
+ * Reads the history insights from the upstream aggregate endpoint (one GROUP BY).
+ * Resolves `undefined` when the upstream does not offer it (404 or unexpected shape) so the caller can fall back to
+ * paging the rows; any other upstream failure propagates exactly like the paging path would.
+ */
+async function readHistoryInsightsAggregate(
+  service: ServiceKey,
+  query: z.infer<typeof DataQuerySchema>,
+  config: AppConfig,
+  routingStore: RoutingStateStore,
+  request: FastifyRequest,
+  upstreamCache: Map<string, CachedUpstreamResponse>,
+  upstreamBreakers: Map<string, CircuitBreaker>,
+  unsupportedUntil: Map<ServiceKey, number>,
+): Promise<HistoryDatasetInsights | null | undefined> {
+  if ((unsupportedUntil.get(service) ?? 0) > Date.now()) {
+    return undefined;
+  }
+
+  const params = new URLSearchParams();
+  if (query.categoryId) {
+    params.set("categoryId", query.categoryId);
+  }
+  if (typeof query.difficultyPercentage === "number") {
+    params.set("difficultyPercentage", String(query.difficultyPercentage));
+  }
+  if (query.status) {
+    params.set("status", query.status);
+  }
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+
+  let payload: unknown;
+  try {
+    payload = await fetchJsonFromService(
+      service,
+      config,
+      routingStore,
+      `/games/history/insights${suffix}`,
+      request,
+      upstreamCache,
+      upstreamBreakers,
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("HTTP 404")) {
+      unsupportedUntil.set(service, Date.now() + HISTORY_INSIGHTS_UNSUPPORTED_TTL_MS);
+      return undefined;
+    }
+    throw error;
+  }
+
+  const groups = parseHistoryInsightsPayload(payload);
+  if (!groups) {
+    unsupportedUntil.set(service, Date.now() + HISTORY_INSIGHTS_UNSUPPORTED_TTL_MS);
+    return undefined;
+  }
+  return buildHistoryDatasetInsightsFromGroups(groups);
+}
+
 async function readCompleteHistoryRows(
   service: ServiceKey,
   query: z.infer<typeof DataQuerySchema>,
@@ -1446,6 +1561,7 @@ export async function backofficeRoutes(
   const upstreamTimeoutMs = config.UPSTREAM_TIMEOUT_MS ?? 15000;
   const routingStore = new RoutingStateStore(config);
   await routingStore.load();
+  const historyInsightsUnsupportedUntil = new Map<ServiceKey, number>();
 
   const runtimeMetrics = metrics ?? {
     snapshot: () => ({
@@ -2106,12 +2222,38 @@ export async function backofficeRoutes(
           rows: dataResult.rows,
         }
       : applyRowsQuery(dataResult.rows, query);
-    const insightRows =
+    let insights: HistoryDatasetInsights | null = null;
+    if (
       query.dataset === "history" &&
       (service === "microservice-quiz" || service === "microservice-wordpass")
-        ? await readCompleteHistoryRows(service, query, dataResult, config, routingStore, request, upstreamCache, upstreamBreakers)
-        : [];
-    const insights = insightRows.length > 0 ? buildHistoryDatasetInsights(insightRows) : null;
+    ) {
+      // Preferred: one upstream GROUP BY. Fallback for services without the aggregate: page through every row.
+      const aggregated = await readHistoryInsightsAggregate(
+        service,
+        query,
+        config,
+        routingStore,
+        request,
+        upstreamCache,
+        upstreamBreakers,
+        historyInsightsUnsupportedUntil,
+      );
+      if (aggregated !== undefined) {
+        insights = aggregated;
+      } else {
+        const insightRows = await readCompleteHistoryRows(
+          service,
+          query,
+          dataResult,
+          config,
+          routingStore,
+          request,
+          upstreamCache,
+          upstreamBreakers,
+        );
+        insights = insightRows.length > 0 ? buildHistoryDatasetInsights(insightRows) : null;
+      }
+    }
     return reply.send({
       service,
       dataset: query.dataset,
