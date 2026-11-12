@@ -1,12 +1,21 @@
-FROM node:20-bookworm-slim AS deps
-WORKDIR /workspace
+# syntax=docker/dockerfile:1
+# Build context: the workspace root that holds bff-backoffice/, shared-sdk-client/
+# and contracts-and-schemas/ side by side.
 
-COPY contracts-and-schemas /workspace/contracts-and-schemas
-COPY shared-sdk-client/typescript /workspace/shared-sdk-client/typescript
-
+# Shared SDK: install, compile, then drop its devDependencies so only runtime
+# packages are copied into the service images below.
+FROM node:22-bookworm-slim AS sdk
 WORKDIR /workspace/shared-sdk-client/typescript
-RUN npm install && npm run build
+COPY shared-sdk-client/typescript/package.json shared-sdk-client/typescript/package-lock.json* ./
+RUN npm ci
+COPY shared-sdk-client/typescript ./
+RUN npm run build && npm prune --omit=dev
 
+# Full dependency tree (dev included) used only to compile the service.
+FROM node:22-bookworm-slim AS deps
+WORKDIR /workspace
+COPY contracts-and-schemas /workspace/contracts-and-schemas
+COPY --from=sdk /workspace/shared-sdk-client/typescript /workspace/shared-sdk-client/typescript
 WORKDIR /workspace/bff-backoffice
 COPY bff-backoffice/src/package.json bff-backoffice/src/package-lock.json* ./
 RUN npm install && \
@@ -14,9 +23,20 @@ RUN npm install && \
 	mkdir -p node_modules/@axiomnode && \
 	cp -R /workspace/shared-sdk-client/typescript node_modules/@axiomnode/shared-sdk-client
 
-FROM node:20-bookworm-slim AS build
+# Production-only dependency tree that ends up in the runtime image.
+FROM node:22-bookworm-slim AS prod-deps
+WORKDIR /workspace
+COPY contracts-and-schemas /workspace/contracts-and-schemas
+COPY --from=sdk /workspace/shared-sdk-client/typescript /workspace/shared-sdk-client/typescript
 WORKDIR /workspace/bff-backoffice
-COPY --from=deps /workspace/shared-sdk-client/typescript /workspace/shared-sdk-client/typescript
+COPY bff-backoffice/src/package.json bff-backoffice/src/package-lock.json* ./
+RUN npm install --omit=dev && \
+	rm -rf node_modules/@axiomnode/shared-sdk-client && \
+	mkdir -p node_modules/@axiomnode && \
+	cp -R /workspace/shared-sdk-client/typescript node_modules/@axiomnode/shared-sdk-client
+
+FROM node:22-bookworm-slim AS build
+WORKDIR /workspace/bff-backoffice
 COPY --from=deps /workspace/bff-backoffice/node_modules ./node_modules
 COPY bff-backoffice/src/package.json ./package.json
 COPY bff-backoffice/src/package-lock.json ./package-lock.json
@@ -25,14 +45,13 @@ COPY bff-backoffice/src/tsconfig.json ./tsconfig.json
 COPY bff-backoffice/src/.env.example ./.env.example
 RUN npm run build
 
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=deps /workspace/shared-sdk-client/typescript /workspace/shared-sdk-client/typescript
-COPY --from=build /workspace/bff-backoffice/node_modules ./node_modules
+COPY --from=prod-deps /workspace/bff-backoffice/node_modules ./node_modules
 COPY --from=build /workspace/bff-backoffice/dist ./dist
 COPY --from=build /workspace/bff-backoffice/.env.example ./.env.example
-RUN mkdir -p /workspace && chown -R node:node /app /workspace
+RUN chown -R node:node /app
 USER node
 EXPOSE 7011
 CMD ["node", "dist/app/server.js"]
