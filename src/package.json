@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@axiomnode/shared-sdk-client": "file:../../shared-sdk-client/typescript",
-    "@fastify/cors": "^10.1.0",
+    "@fastify/cors": "^11.2.0",
     "dotenv": "^16.4.5",
     "fastify": "^5.0.0",
     "zod": "^4.6.7"
@@ -29,5 +29,8 @@
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",
     "vitest": "^4.1.12"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
