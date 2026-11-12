@@ -25,6 +25,7 @@ const envSchema = z.object({
     .transform((value) => (value === undefined ? true : value.toLowerCase() !== "false")),
   UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
   UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS: z.coerce.number().int().min(250).max(120000).default(3000),
+  AI_ENGINE_ADMIN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(10000),
   UPSTREAM_METRICS_CACHE_TTL_MS: z.coerce.number().int().min(0).max(60000).default(5000),
   UPSTREAM_CATALOGS_CACHE_TTL_MS: z.coerce.number().int().min(0).max(600000).default(60000),
   UPSTREAM_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(20).default(3),
@@ -63,6 +64,7 @@ export type AppConfig = Omit<
   | "KUBERNETES_OBSERVABILITY_ENABLED"
   | "UPSTREAM_TIMEOUT_MS"
   | "UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS"
+  | "AI_ENGINE_ADMIN_TIMEOUT_MS"
   | "UPSTREAM_METRICS_CACHE_TTL_MS"
   | "UPSTREAM_CATALOGS_CACHE_TTL_MS"
   | "UPSTREAM_CIRCUIT_FAILURE_THRESHOLD"
@@ -92,6 +94,7 @@ export type AppConfig = Omit<
   KUBERNETES_OBSERVABILITY_ENABLED?: boolean;
   UPSTREAM_TIMEOUT_MS?: number;
   UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS?: number;
+  AI_ENGINE_ADMIN_TIMEOUT_MS?: number;
   UPSTREAM_METRICS_CACHE_TTL_MS?: number;
   UPSTREAM_CATALOGS_CACHE_TTL_MS?: number;
   UPSTREAM_CIRCUIT_FAILURE_THRESHOLD?: number;

@@ -778,6 +778,45 @@ async function probeAiEngineTarget(
   };
 }
 
+const AI_ENGINE_ADMIN_DEFAULT_TIMEOUT_MS = 10000;
+
+/**
+ * fetch() bounded by an abort timer that also covers the response body, so a
+ * hung ai-engine cannot pin a request for undici's 300 s defaults.
+ * The body is fully read inside the timer window and returned as text.
+ */
+async function fetchAiEngineAdmin(
+  config: AppConfig,
+  url: string,
+  init: RequestInit,
+  description: string,
+): Promise<{ ok: boolean; status: number; text: string }> {
+  const timeoutMs = config.AI_ENGINE_ADMIN_TIMEOUT_MS ?? AI_ENGINE_ADMIN_DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, text };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`${description} timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+function parseAiEngineJson(text: string, description: string): Record<string, unknown> {
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error(`${description} returned a non-JSON response`);
+  }
+}
+
 async function getAiEngineRuntimeTarget(
   config: AppConfig,
   routingStore: RoutingStateStore,
@@ -789,17 +828,18 @@ async function getAiEngineRuntimeTarget(
   if (serviceApiKey) {
     headers["x-api-key"] = serviceApiKey;
   }
-  const response = await fetch(targetUrl, {
-    method: "GET",
-    headers,
-  });
+  const response = await fetchAiEngineAdmin(
+    config,
+    targetUrl,
+    { method: "GET", headers },
+    "ai-engine llama target read",
+  );
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `ai-engine llama target read failed with HTTP ${response.status}`);
+    throw new Error(response.text || `ai-engine llama target read failed with HTTP ${response.status}`);
   }
 
-  return response.json() as Promise<Record<string, unknown>>;
+  return parseAiEngineJson(response.text, "ai-engine llama target read");
 }
 
 async function getAiEnginePluginCapabilities(
@@ -814,17 +854,18 @@ async function getAiEnginePluginCapabilities(
     headers["x-api-key"] = serviceApiKey;
   }
 
-  const response = await fetch(targetUrl, {
-    method: "GET",
-    headers,
-  });
+  const response = await fetchAiEngineAdmin(
+    config,
+    targetUrl,
+    { method: "GET", headers },
+    "ai-engine plugin capabilities read",
+  );
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `ai-engine plugin capabilities read failed with HTTP ${response.status}`);
+    throw new Error(response.text || `ai-engine plugin capabilities read failed with HTTP ${response.status}`);
   }
 
-  return response.json() as Promise<Record<string, unknown>>;
+  return parseAiEngineJson(response.text, "ai-engine plugin capabilities read");
 }
 
 async function syncAiEngineLlamaTarget(
@@ -848,18 +889,18 @@ async function syncAiEngineLlamaTarget(
     headers["content-type"] = "application/json";
   }
 
-  const response = await fetch(targetUrl, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const response = await fetchAiEngineAdmin(
+    config,
+    targetUrl,
+    { method, headers, body: body ? JSON.stringify(body) : undefined },
+    "ai-engine llama target sync",
+  );
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `ai-engine llama target sync failed with HTTP ${response.status}`);
+    throw new Error(response.text || `ai-engine llama target sync failed with HTTP ${response.status}`);
   }
 
-  return response.json() as Promise<Record<string, unknown>>;
+  return parseAiEngineJson(response.text, "ai-engine llama target sync");
 }
 
 function normalizeForwardHeaders(

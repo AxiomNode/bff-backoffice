@@ -3541,6 +3541,76 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
+  it("bounds ai-engine admin fetches with an abort timeout", async () => {
+    const app = Fastify();
+    const signals: AbortSignal[] = [];
+
+    // Never resolves unless the caller aborts: simulates a hung ai-engine.
+    const fetchMock = vi.fn().mockImplementation(
+      (_url: string, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal;
+          signals.push(signal);
+          signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
+      AI_ENGINE_ADMIN_TIMEOUT_MS: 50,
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/ai-engine/plugin/capabilities",
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({
+      message: "ai-engine-api unreachable: ai-engine plugin capabilities read timed out after 50ms",
+    });
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+
+    await app.close();
+  });
+
+  it("passes an abort signal on every ai-engine admin fetch and rejects non-JSON bodies", async () => {
+    const app = Fastify();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("<html>bad gateway</html>", { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await backofficeRoutes(app, withStateFile({
+      SERVICE_NAME: "bff-backoffice",
+      SERVICE_PORT: 7011,
+      ALLOWED_ORIGINS: "http://localhost:3000",
+      USERS_SERVICE_URL: "http://microservice-users:7102",
+      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
+    }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/backoffice/ai-engine/plugin/capabilities",
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({
+      message: "ai-engine-api unreachable: ai-engine plugin capabilities read returned a non-JSON response",
+    });
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+
+    await app.close();
+  });
+
   it("exposes ai-engine plugin capabilities through the backoffice BFF", async () => {
     const app = Fastify();
 
