@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, stat, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
@@ -180,11 +180,7 @@ export class AuditTrailStore {
     await mkdir(this.dir, { recursive: true });
     const filePath = path.join(this.dir, dailyFileName(now));
     const line = `${JSON.stringify(event)}\n`;
-    let existing = "";
-    if (existsSync(filePath)) {
-      existing = await readFile(filePath, "utf-8");
-    }
-    await writeFile(filePath, existing + line, "utf-8");
+    await appendFile(filePath, line, "utf-8");
 
     if (now.getTime() - this.lastRetentionRun > 60_000) {
       this.lastRetentionRun = now.getTime();
