@@ -1,43 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import Fastify from "fastify";
 
-const fetchKubernetesOverviewMock = vi.hoisted(() => vi.fn());
-
-vi.mock("../app/services/kubernetesObservability.js", () => ({
-  fetchKubernetesOverview: fetchKubernetesOverviewMock,
-}));
-
 import { backofficeRoutes } from "../app/routes/backoffice.js";
-import { RoutingStateStore } from "../app/services/routingStateStore.js";
-
-let tempStateDir = "";
-let defaultStateFile = "";
-
-function withStateFile<T extends Record<string, unknown>>(config: T): T & { BACKOFFICE_ROUTING_STATE_FILE: string } {
-  return {
-    ...config,
-    BACKOFFICE_ROUTING_STATE_FILE: defaultStateFile,
-  };
-}
 
 describe("backoffice routes", () => {
-  beforeEach(async () => {
-    fetchKubernetesOverviewMock.mockReset();
-    tempStateDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-test-"));
-    defaultStateFile = path.join(tempStateDir, "routing-state.json");
-  });
-
-  afterEach(async () => {
+  afterEach(() => {
     vi.unstubAllGlobals();
-    if (tempStateDir) {
-      await rm(tempStateDir, { recursive: true, force: true });
-    }
-    tempStateDir = "";
-    defaultStateFile = "";
   });
 
   it("forwards leaderboard to microservice-users", async () => {
@@ -52,12 +21,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -84,175 +53,18 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
-  it("returns kubernetes overview from the observability service", async () => {
-    const app = Fastify();
-
-    fetchKubernetesOverviewMock.mockResolvedValue({
-      enabled: true,
-      fetchedAt: "2026-04-27T10:00:00.000Z",
-      namespace: "axiomnode-stg",
-      source: "cluster",
-      message: null,
-      cluster: {
-        apiBaseUrl: "https://kubernetes.default.svc",
-        nodeCount: 1,
-        readyNodeCount: 1,
-        deploymentCount: 2,
-        podCount: 4,
-        runningPodCount: 4,
-        notReadyPodCount: 0,
-        restartCount: 1,
-        cpuUsageMillicores: 340,
-        cpuCapacityMillicores: 2000,
-        cpuUsageRatio: 0.17,
-        memoryUsageBytes: 805306368,
-        memoryCapacityBytes: 4294967296,
-        memoryUsageRatio: 0.1875,
-        namespaceCpuRequestMillicores: 800,
-        namespaceCpuLimitMillicores: 1200,
-        namespaceMemoryRequestBytes: 536870912,
-        namespaceMemoryLimitBytes: 1073741824,
-      },
-      nodes: [],
-      workloads: [],
-      topPods: [],
-    });
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/kubernetes/overview",
-      headers: { authorization: "Bearer staff-token" },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      enabled: true,
-      namespace: "axiomnode-stg",
-      cluster: expect.objectContaining({
-        nodeCount: 1,
-        podCount: 4,
-      }),
-    });
-    expect(fetchKubernetesOverviewMock).toHaveBeenCalledTimes(1);
-
-    await app.close();
-  });
-
-  it("surfaces kubernetes overview upstream failures", async () => {
-    const app = Fastify();
-
-    fetchKubernetesOverviewMock.mockRejectedValue(new Error("metrics api unavailable"));
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/kubernetes/overview",
-      headers: { authorization: "Bearer staff-token" },
-    });
-
-    expect(response.statusCode).toBe(503);
-    expect(response.json()).toMatchObject({
-      message: "Failed to load Kubernetes overview",
-      error: "metrics api unavailable",
-    });
-
-    await app.close();
-  });
-
-  it("falls back to a generic message when kubernetes overview rejects with a non-error value", async () => {
-    const app = Fastify();
-
-    fetchKubernetesOverviewMock.mockRejectedValue("boom");
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/kubernetes/overview",
-      headers: { authorization: "Bearer staff-token" },
-    });
-
-    expect(response.statusCode).toBe(503);
-    expect(response.json()).toMatchObject({
-      message: "Failed to load Kubernetes overview",
-      error: "Unknown error",
-    });
-
-    await app.close();
-  });
-
-  it("rejects invalid routing history limits", async () => {
-    const app = Fastify();
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/routing/history?limit=5000",
-    });
-
-    expect(response.statusCode).toBe(400);
-    expect(response.json()).toMatchObject({ message: "Invalid query parameters" });
-
-    await app.close();
-  });
-
-  it("returns an empty routing history payload when no persisted changes exist", async () => {
-    const app = Fastify();
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/routing/history?limit=5",
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ total: 0, history: [] });
-
-    await app.close();
-  });
-
   it("rejects invalid leaderboard query params before proxying", async () => {
     const app = Fastify();
 
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -278,14 +90,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -324,14 +136,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "DELETE",
@@ -364,14 +176,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "DELETE",
@@ -398,14 +210,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const invalidService = await app.inject({
       method: "DELETE",
@@ -436,14 +248,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "PATCH",
@@ -487,13 +299,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -528,13 +340,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -566,14 +378,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       UPSTREAM_CATALOGS_CACHE_TTL_MS: 60000,
-    }));
+    });
 
     const nowSpy = vi.spyOn(Date, "now");
     nowSpy.mockReturnValue(1000);
@@ -612,13 +424,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       UPSTREAM_METRICS_CACHE_TTL_MS: 5000,
-    }));
+    });
 
     const nowSpy = vi.spyOn(Date, "now");
     nowSpy.mockReturnValue(1000);
@@ -657,13 +469,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -693,14 +505,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -745,14 +557,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -793,13 +605,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -846,13 +658,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -893,13 +705,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -929,14 +741,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -971,13 +783,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1011,12 +823,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1050,12 +862,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1087,13 +899,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1130,13 +942,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1179,12 +991,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1236,12 +1048,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1303,12 +1115,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const commonHeaders = {
       authorization: "Bearer staff-token",
@@ -1416,14 +1228,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const waitResponse = await app.inject({
       method: "POST",
@@ -1493,14 +1305,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1542,14 +1354,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1581,14 +1393,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1609,14 +1421,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1643,14 +1455,14 @@ describe("backoffice routes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1674,14 +1486,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -1713,14 +1525,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -1755,14 +1567,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -1786,14 +1598,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -1820,14 +1632,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -1849,14 +1661,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1883,14 +1695,14 @@ describe("backoffice routes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -1911,14 +1723,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const insertResponse = await app.inject({
       method: "POST",
@@ -1960,14 +1772,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const updateResponse = await app.inject({
       method: "PATCH",
@@ -2005,14 +1817,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const invalidMetrics = await app.inject({
       method: "GET",
@@ -2067,24 +1879,6 @@ describe("backoffice routes", () => {
       url: "/v1/backoffice/ai-engine/target",
       payload: {},
     });
-    const invalidPresetId = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/ai-engine/presets/not-a-uuid",
-      payload: {
-        name: "preset",
-        host: "localhost",
-        port: 17002,
-      },
-    });
-    const invalidServiceTarget = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/not-real",
-      payload: { baseUrl: "http://localhost:9999" },
-    });
-    const invalidDeletePresetId = await app.inject({
-      method: "DELETE",
-      url: "/v1/backoffice/ai-engine/presets/",
-    });
 
     expect(invalidMetrics.statusCode).toBe(400);
     expect(invalidLogs.statusCode).toBe(400);
@@ -2098,9 +1892,6 @@ describe("backoffice routes", () => {
     expect(invalidDeleteQuery.statusCode).toBe(400);
     expect(invalidProbePayload.statusCode).toBe(400);
     expect(invalidAiTargetPayload.statusCode).toBe(400);
-    expect(invalidPresetId.statusCode).toBe(404);
-    expect(invalidServiceTarget.statusCode).toBe(400);
-    expect(invalidDeletePresetId.statusCode).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
 
     await app.close();
@@ -2112,14 +1903,14 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
+    });
 
     const invalidLogs = await app.inject({
       method: "GET",
@@ -2170,7 +1961,7 @@ describe("backoffice routes", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -2178,7 +1969,7 @@ describe("backoffice routes", () => {
       QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
       AI_ENGINE_API_URL: "http://ai-engine-api:7002",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -2190,29 +1981,6 @@ describe("backoffice routes", () => {
       message: "Service 'ai-engine-api' does not support tabular data queries",
     });
     expect(fetchMock).not.toHaveBeenCalled();
-
-    await app.close();
-  });
-
-  it("rejects missing presets and invalid ids on ai-engine preset deletion", async () => {
-    const app = Fastify();
-
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
-
-    const missing = await app.inject({
-      method: "DELETE",
-      url: "/v1/backoffice/ai-engine/presets/550e8400-e29b-41d4-a716-446655440000",
-    });
-
-    expect(missing.statusCode).toBe(404);
-    expect(missing.json()).toEqual({ message: "Preset not found" });
 
     await app.close();
   });
@@ -2237,14 +2005,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
       AI_ENGINE_API_KEY: "engine-key",
-    }));
+    });
 
     const runResponse = await app.inject({
       method: "POST",
@@ -2294,13 +2062,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-    }));
+    });
 
     const ragResponse = await app.inject({
       method: "GET",
@@ -2340,14 +2108,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
       UPSTREAM_METRICS_CACHE_TTL_MS: 5000,
-    }));
+    });
 
     const nowSpy = vi.spyOn(Date, "now");
     nowSpy.mockReturnValue(2000);
@@ -2412,14 +2180,14 @@ describe("backoffice routes", () => {
       recentLogs: () => [{ level: "info", message: "local log" }],
     };
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-    }), metrics as never);
+    }, metrics as never);
 
     const localLogs = await app.inject({
       method: "GET",
@@ -2520,7 +2288,7 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -2531,7 +2299,7 @@ describe("backoffice routes", () => {
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
       AI_ENGINE_STATS_URL: "http://localhost:7000",
       AI_ENGINE_API_URL: "http://localhost:7001",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -2620,7 +2388,7 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -2631,7 +2399,7 @@ describe("backoffice routes", () => {
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
       AI_ENGINE_STATS_URL: "http://localhost:7000",
       AI_ENGINE_API_URL: "http://localhost:7001",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -2715,7 +2483,7 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -2726,7 +2494,7 @@ describe("backoffice routes", () => {
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
       AI_ENGINE_STATS_URL: "http://localhost:7000",
       AI_ENGINE_API_URL: "http://localhost:7001",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -2845,7 +2613,7 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -2856,7 +2624,7 @@ describe("backoffice routes", () => {
       WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
       AI_ENGINE_STATS_URL: "http://localhost:7000",
       AI_ENGINE_API_URL: "http://localhost:7001",
-    }));
+    });
 
     const [first, second] = await Promise.all([
       app.inject({
@@ -2942,7 +2710,7 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -2955,7 +2723,7 @@ describe("backoffice routes", () => {
       AI_ENGINE_API_URL: "http://localhost:7001",
       UPSTREAM_TIMEOUT_MS: 10000,
       UPSTREAM_OPERATIONAL_SUMMARY_TIMEOUT_MS: 50,
-    }));
+    });
 
     const startedAt = Date.now();
     const response = await app.inject({
@@ -2995,14 +2763,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
       AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -3034,7 +2802,7 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -3042,7 +2810,7 @@ describe("backoffice routes", () => {
       AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
       AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
       UPSTREAM_METRICS_CACHE_TTL_MS: 1000,
-    }));
+    });
 
     const nowSpy = vi.spyOn(Date, "now");
     nowSpy.mockReturnValue(2000);
@@ -3087,14 +2855,14 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
       AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -3121,359 +2889,12 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
-  it("lists configurable service targets and applies runtime overrides", async () => {
-    const app = Fastify();
-
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ categories: [] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
-      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-      BFF_MOBILE_URL: "http://bff-mobile:7010",
-      API_GATEWAY_URL: "http://api-gateway:7005",
-    }));
-
-    const listResponse = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/service-targets",
-    });
-
-    expect(listResponse.statusCode).toBe(200);
-    expect(listResponse.json()).toMatchObject({
-      total: 7,
-      targets: expect.arrayContaining([
-        expect.objectContaining({
-          service: "microservice-quiz",
-          source: "env",
-          baseUrl: "http://microservice-quizz:7100",
-        }),
-        expect.objectContaining({
-          service: "ai-engine-api",
-          source: "env",
-          baseUrl: "http://localhost:7001",
-        }),
-      ]),
-    });
-
-    const overrideResponse = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/microservice-quiz",
-      payload: {
-        baseUrl: "http://192.168.1.90:17100",
-        label: "gpu lab quiz",
-      },
-    });
-
-    expect(overrideResponse.statusCode).toBe(200);
-    expect(overrideResponse.json()).toMatchObject({
-      service: "microservice-quiz",
-      source: "override",
-      baseUrl: "http://192.168.1.90:17100",
-      label: "gpu lab quiz",
-    });
-
-    const catalogsResponse = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/services/microservice-quiz/catalogs",
-    });
-
-    expect(catalogsResponse.statusCode).toBe(200);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://192.168.1.90:17100/catalogs",
-      expect.objectContaining({
-        headers: expect.any(Object),
-      }),
-    );
-
-    await app.close();
-  });
-
-  it("returns persisted routing history entries for target and preset changes", async () => {
-    const app = Fastify();
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
-      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-      BFF_MOBILE_URL: "http://bff-mobile:7010",
-      API_GATEWAY_URL: "http://api-gateway:7005",
-      AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
-      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-    }));
-
-    const setTargetResponse = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/api-gateway",
-      payload: { baseUrl: "http://api-gateway:7005", label: "cluster" },
-    });
-    expect(setTargetResponse.statusCode).toBe(200);
-
-    const createPresetResponse = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/presets",
-      payload: { name: "Lab", host: "10.0.0.10", protocol: "http", port: 7002 },
-    });
-    expect(createPresetResponse.statusCode).toBe(201);
-
-    const historyResponse = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/routing/history?limit=10",
-    });
-
-    expect(historyResponse.statusCode).toBe(200);
-    expect(historyResponse.json()).toMatchObject({
-      total: 2,
-      history: [
-        expect.objectContaining({ action: "ai-engine-preset-set" }),
-        expect.objectContaining({ action: "service-target-set", service: "api-gateway" }),
-      ],
-    });
-
-    await app.close();
-  });
-
-  it("does not persist ai-engine-api as a generic routing override across BFF restarts", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-routing-"));
-    const stateFile = path.join(tempDir, "routing-state.json");
-
-    const appA = Fastify();
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(appA, {
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
-      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-      BACKOFFICE_ROUTING_STATE_FILE: stateFile,
-    });
-
-    const setResponse = await appA.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/ai-engine-api",
-      payload: {
-        baseUrl: "http://192.168.1.80:17001",
-        label: "gpu workstation",
-      },
-    });
-
-    expect(setResponse.statusCode).toBe(200);
-    await appA.close();
-    vi.unstubAllGlobals();
-
-    const appB = Fastify();
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(appB, {
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
-      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-      BACKOFFICE_ROUTING_STATE_FILE: stateFile,
-    });
-
-    const getResponse = await appB.inject({
-      method: "GET",
-      url: "/v1/backoffice/service-targets/ai-engine-api",
-    });
-
-    expect(getResponse.statusCode).toBe(200);
-    expect(getResponse.json()).toMatchObject({
-      service: "ai-engine-api",
-      source: "env",
-      baseUrl: "http://ai-engine-api:7001",
-      label: null,
-    });
-
-    await appB.close();
-    await rm(tempDir, { recursive: true, force: true });
-  });
-
-  it("rejects service target overrides outside the allowlist", async () => {
-    const app = Fastify();
-
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      API_GATEWAY_URL: "http://api-gateway:7005",
-      ALLOWED_ROUTING_TARGET_HOSTS: "localhost,127.0.0.1,192.168.0.0/16",
-    }));
-
-    const response = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/microservice-users",
-      payload: {
-        baseUrl: "https://example.com",
-      },
-    });
-
-    expect(response.statusCode).toBe(400);
-    expect(response.json()).toMatchObject({
-      message: "host 'example.com' is not allowed by ALLOWED_ROUTING_TARGET_HOSTS",
-    });
-
-    await app.close();
-  });
-
-  it("accepts service target overrides that match wildcard and CIDR allowlist rules", async () => {
-    const app = Fastify();
-
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      API_GATEWAY_URL: "http://api-gateway:7005",
-      ALLOWED_ROUTING_TARGET_HOSTS: "*.internal,192.168.0.0/16",
-    }));
-
-    const wildcardResponse = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/microservice-users",
-      payload: {
-        baseUrl: "https://users.internal:7443",
-        label: "wildcard host",
-      },
-    });
-    const cidrResponse = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/api-gateway",
-      payload: {
-        baseUrl: "http://192.168.1.80:7005",
-        label: "cidr host",
-      },
-    });
-
-    expect(wildcardResponse.statusCode).toBe(200);
-    expect(wildcardResponse.json()).toMatchObject({
-      service: "microservice-users",
-      source: "override",
-      baseUrl: "https://users.internal:7443",
-      label: "wildcard host",
-    });
-    expect(cidrResponse.statusCode).toBe(200);
-    expect(cidrResponse.json()).toMatchObject({
-      service: "api-gateway",
-      source: "override",
-      baseUrl: "http://192.168.1.80:7005",
-      label: "cidr host",
-    });
-
-    await app.close();
-  });
-
-  it("accepts service target overrides when the allowlist uses a /0 CIDR rule", async () => {
-    const app = Fastify();
-
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      ALLOWED_ROUTING_TARGET_HOSTS: "0.0.0.0/0",
-    }));
-
-    const response = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/microservice-users",
-      payload: {
-        baseUrl: "http://8.8.8.8:7102",
-      },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      service: "microservice-users",
-      source: "override",
-      baseUrl: "http://8.8.8.8:7102",
-    });
-
-    await app.close();
-  });
-
-  it("rejects malformed service target base urls and invalid configurable service keys", async () => {
-    const app = Fastify();
-
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      API_GATEWAY_URL: "http://api-gateway:7005",
-    }));
-
-    const invalidGet = await app.inject({
-      method: "GET",
-      url: "/v1/backoffice/service-targets/not-a-service",
-    });
-    const invalidDelete = await app.inject({
-      method: "DELETE",
-      url: "/v1/backoffice/service-targets/not-a-service",
-    });
-    const invalidBaseUrl = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/microservice-users",
-      payload: {
-        baseUrl: "https://users.internal/api?debug=1",
-      },
-    });
-    const invalidProtocol = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/microservice-users",
-      payload: {
-        baseUrl: "ftp://users.internal",
-      },
-    });
-
-    expect(invalidGet.statusCode).toBe(400);
-    expect(invalidGet.json()).toEqual({ message: "Invalid configurable service" });
-    expect(invalidDelete.statusCode).toBe(400);
-    expect(invalidDelete.json()).toEqual({ message: "Invalid configurable service" });
-    expect(invalidBaseUrl.statusCode).toBe(400);
-    expect(invalidBaseUrl.json()).toMatchObject({
-      message: "baseUrl must not include path, query, or hash",
-    });
-    expect(invalidProtocol.statusCode).toBe(400);
-    expect(invalidProtocol.json()).toMatchObject({
-      message: "baseUrl must use http or https",
-    });
-
-    await app.close();
-  });
-
   it("denies ai-engine target overrides outside the allowlist", async () => {
     const app = Fastify();
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -3481,7 +2902,7 @@ describe("backoffice routes", () => {
       API_GATEWAY_URL: "http://api-gateway:7005",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
       ALLOWED_ROUTING_TARGET_HOSTS: "localhost,127.0.0.1,192.168.0.0/16",
-    }));
+    });
 
     const response = await app.inject({
       method: "PUT",
@@ -3516,13 +2937,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -3556,14 +2977,14 @@ describe("backoffice routes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
       AI_ENGINE_ADMIN_TIMEOUT_MS: 50,
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -3587,13 +3008,13 @@ describe("backoffice routes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -3630,13 +3051,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -3654,91 +3075,7 @@ describe("backoffice routes", () => {
     await app.close();
   });
 
-  it("manages persistent ai-engine connections and activates a saved connection", async () => {
-    const app = Fastify();
-
-    let activeTarget = {
-      source: "env",
-      label: null,
-      host: "localhost",
-      protocol: "http",
-      port: 7002,
-      llamaBaseUrl: "http://localhost:7002/v1/completions",
-    };
-
-    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "http://ai-engine-api:7001/internal/admin/llama-target" && (!options?.method || options.method === "GET")) {
-        return Promise.resolve(new Response(JSON.stringify(activeTarget), { status: 200, headers: { "content-type": "application/json" } }));
-      }
-
-      if (url === "http://ai-engine-api:7001/internal/admin/llama-target" && options?.method === "PUT") {
-        const body = JSON.parse(String(options.body));
-        activeTarget = {
-          source: "override",
-          label: body.label,
-          host: body.host,
-          protocol: body.protocol,
-          port: body.port,
-          llamaBaseUrl: `${body.protocol}://${body.host}:${body.port}/v1/completions`,
-        };
-        return Promise.resolve(new Response(JSON.stringify(activeTarget), { status: 200, headers: { "content-type": "application/json" } }));
-      }
-
-      return Promise.resolve(new Response("not found", { status: 404 }));
-    });
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-      ALLOWED_ROUTING_TARGET_HOSTS: "localhost,127.0.0.1,10.0.0.0/8",
-    }));
-
-    const createResponse = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/connections",
-      payload: {
-        name: "Lab GPU",
-        host: "10.0.0.44",
-        protocol: "http",
-        port: 17002,
-      },
-    });
-
-    expect(createResponse.statusCode).toBe(201);
-    const created = createResponse.json() as { connections: Array<{ id: string; name: string; active: boolean }> };
-    const connection = created.connections.find((entry) => entry.name === "Lab GPU");
-    expect(connection).toBeTruthy();
-    expect(connection?.active).toBe(false);
-
-    const activateResponse = await app.inject({
-      method: "POST",
-      url: `/v1/backoffice/ai-engine/connections/${connection!.id}/activate`,
-    });
-
-    expect(activateResponse.statusCode).toBe(200);
-    expect(activateResponse.json()).toMatchObject({
-      activeConnectionId: connection!.id,
-      target: {
-        source: "override",
-        label: "Lab GPU",
-        host: "10.0.0.44",
-        port: 17002,
-      },
-      connections: expect.arrayContaining([expect.objectContaining({ id: connection!.id, active: true })]),
-    });
-
-    await app.close();
-  });
-
-  it("surfaces ai-engine route validation and not-found errors", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-ai-errors-"));
-    const stateFile = path.join(tempDir, "routing-state.json");
-
+  it("surfaces ai-engine target validation and sync errors", async () => {
     const app = Fastify();
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
       new Response("sync failed", {
@@ -3755,7 +3092,6 @@ describe("backoffice routes", () => {
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-      BACKOFFICE_ROUTING_STATE_FILE: stateFile,
     });
 
     const invalidProbe = await app.inject({
@@ -3766,91 +3102,25 @@ describe("backoffice routes", () => {
         port: 17002,
       },
     });
-    const invalidPresetCreate = await app.inject({
+    const invalidProbePayload = await app.inject({
       method: "POST",
-      url: "/v1/backoffice/ai-engine/presets",
+      url: "/v1/backoffice/ai-engine/probe",
+      payload: {},
+    });
+    const invalidTargetHost = await app.inject({
+      method: "PUT",
+      url: "/v1/backoffice/ai-engine/target",
       payload: {
-        name: "Preset roto",
         host: "bad host",
         port: 17002,
       },
     });
-    const invalidPresetCreatePayload = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/presets",
+    const invalidTargetPayload = await app.inject({
+      method: "PUT",
+      url: "/v1/backoffice/ai-engine/target",
       payload: {},
     });
-    const presetUpdateMissing = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/ai-engine/presets/missing-preset",
-      payload: {
-        name: "Preset missing",
-        host: "10.0.0.30",
-        protocol: "http",
-        port: 17002,
-      },
-    });
-    const invalidPresetUpdateId = await app.inject({
-      method: "PUT",
-      url: `/v1/backoffice/ai-engine/presets/${"x".repeat(121)}`,
-      payload: {
-        name: "Preset invalid id",
-        host: "10.0.0.30",
-        protocol: "http",
-        port: 17002,
-      },
-    });
-    const presetUpdateInvalidHost = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/ai-engine/presets/this-pc-lan",
-      payload: {
-        name: "Preset roto",
-        host: "bad host",
-        protocol: "http",
-        port: 17002,
-      },
-    });
-    const presetUpdateInvalidPayload = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/ai-engine/presets/this-pc-lan",
-      payload: {},
-    });
-    const presetDeleteMissing = await app.inject({
-      method: "DELETE",
-      url: "/v1/backoffice/ai-engine/presets/missing-preset",
-    });
-    const connectionUpdateInvalidPayload = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/ai-engine/connections/this-pc-lan",
-      payload: {},
-    });
-    const connectionUpdateMissing = await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/ai-engine/connections/missing-preset",
-      payload: {
-        name: "Missing connection",
-        host: "10.0.0.30",
-        protocol: "http",
-        port: 17002,
-      },
-    });
-    const connectionActivateMissing = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/connections/missing-preset/activate",
-    });
-    const connectionDeleteMissing = await app.inject({
-      method: "DELETE",
-      url: "/v1/backoffice/ai-engine/connections/missing-preset",
-    });
-    const connectionDeleteExisting = await app.inject({
-      method: "DELETE",
-      url: "/v1/backoffice/ai-engine/connections/workstation-public",
-    });
-    const connectionActivateSyncFailure = await app.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/connections/this-pc-lan/activate",
-    });
-    const invalidTargetPut = await app.inject({
+    const targetPutSyncFailure = await app.inject({
       method: "PUT",
       url: "/v1/backoffice/ai-engine/target",
       payload: {
@@ -3858,7 +3128,7 @@ describe("backoffice routes", () => {
         port: 17002,
       },
     });
-    const invalidTargetDelete = await app.inject({
+    const targetDeleteSyncFailure = await app.inject({
       method: "DELETE",
       url: "/v1/backoffice/ai-engine/target",
     });
@@ -3867,191 +3137,20 @@ describe("backoffice routes", () => {
     expect(invalidProbe.json()).toMatchObject({
       message: "host must be a valid hostname or IPv4 address",
     });
-    expect(invalidPresetCreate.statusCode).toBe(400);
-    expect(invalidPresetCreate.json()).toMatchObject({
+    expect(invalidProbePayload.statusCode).toBe(400);
+    expect(invalidProbePayload.json()).toMatchObject({ message: "Invalid payload" });
+    expect(invalidTargetHost.statusCode).toBe(400);
+    expect(invalidTargetHost.json()).toMatchObject({
       message: "host must be a valid hostname or IPv4 address",
     });
-    expect(invalidPresetCreatePayload.statusCode).toBe(400);
-    expect(invalidPresetCreatePayload.json()).toMatchObject({
-      message: "Invalid payload",
-    });
-    expect(presetUpdateMissing.statusCode).toBe(404);
-    expect(presetUpdateMissing.json()).toEqual({ message: "Preset not found" });
-    // Fastify 5.12 answers 414 (URI Too Long) when a path parameter exceeds maxParamLength.
-    expect(invalidPresetUpdateId.statusCode).toBe(414);
-    expect(presetUpdateInvalidHost.statusCode).toBe(400);
-    expect(presetUpdateInvalidHost.json()).toMatchObject({
-      message: "host must be a valid hostname or IPv4 address",
-    });
-    expect(presetUpdateInvalidPayload.statusCode).toBe(400);
-    expect(presetUpdateInvalidPayload.json()).toMatchObject({
-      message: "Invalid payload",
-    });
-    expect(presetDeleteMissing.statusCode).toBe(404);
-    expect(presetDeleteMissing.json()).toEqual({ message: "Preset not found" });
-    expect(connectionUpdateInvalidPayload.statusCode).toBe(400);
-    expect(connectionUpdateInvalidPayload.json()).toMatchObject({ message: "Invalid payload" });
-    expect(connectionUpdateMissing.statusCode).toBe(404);
-    expect(connectionUpdateMissing.json()).toEqual({ message: "Connection not found" });
-    expect(connectionActivateMissing.statusCode).toBe(404);
-    expect(connectionActivateMissing.json()).toEqual({ message: "Connection not found" });
-    expect(connectionDeleteMissing.statusCode).toBe(404);
-    expect(connectionDeleteMissing.json()).toEqual({ message: "Connection not found" });
-    expect(connectionDeleteExisting.statusCode).toBe(500);
-    expect(connectionActivateSyncFailure.statusCode).toBe(400);
-    expect(connectionActivateSyncFailure.json()).toMatchObject({ message: "sync failed" });
-    expect(invalidTargetPut.statusCode).toBe(400);
-    expect(invalidTargetPut.json()).toMatchObject({ message: "sync failed" });
-    expect(invalidTargetDelete.statusCode).toBe(400);
-    expect(invalidTargetDelete.json()).toMatchObject({ message: "sync failed" });
+    expect(invalidTargetPayload.statusCode).toBe(400);
+    expect(invalidTargetPayload.json()).toMatchObject({ message: "Invalid payload" });
+    expect(targetPutSyncFailure.statusCode).toBe(400);
+    expect(targetPutSyncFailure.json()).toMatchObject({ message: "sync failed" });
+    expect(targetDeleteSyncFailure.statusCode).toBe(400);
+    expect(targetDeleteSyncFailure.json()).toMatchObject({ message: "sync failed" });
 
     await app.close();
-    await rm(tempDir, { recursive: true, force: true });
-  });
-
-  it("lists, creates, updates, deletes, and persists shared ai-engine presets", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-presets-"));
-    const stateFile = path.join(tempDir, "routing-state.json");
-
-    const appA = Fastify();
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(appA, {
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      BACKOFFICE_ROUTING_STATE_FILE: stateFile,
-    });
-
-    const listResponse = await appA.inject({
-      method: "GET",
-      url: "/v1/backoffice/ai-engine/presets",
-    });
-
-    expect(listResponse.statusCode).toBe(200);
-    expect(listResponse.json()).toMatchObject({
-      total: 2,
-      presets: expect.arrayContaining([
-        expect.objectContaining({ id: "this-pc-lan", host: "192.168.0.14" }),
-        expect.objectContaining({ id: "workstation-public", host: "203.0.113.10" }),
-      ]),
-    });
-
-    const createResponse = await appA.inject({
-      method: "POST",
-      url: "/v1/backoffice/ai-engine/presets",
-      payload: {
-        name: "Relay alternativo",
-        host: "10.0.0.25",
-        protocol: "http",
-        port: 18002,
-      },
-    });
-
-    expect(createResponse.statusCode).toBe(201);
-    const createdPreset = createResponse.json() as { id: string };
-    expect(createdPreset.id).toBeTruthy();
-
-    const updateResponse = await appA.inject({
-      method: "PUT",
-      url: `/v1/backoffice/ai-engine/presets/${createdPreset.id}`,
-      payload: {
-        name: "Relay alternativo v2",
-        host: "10.0.0.26",
-        protocol: "https",
-        port: 18443,
-      },
-    });
-
-    expect(updateResponse.statusCode).toBe(200);
-    expect(updateResponse.json()).toMatchObject({
-      id: createdPreset.id,
-      name: "Relay alternativo v2",
-      host: "10.0.0.26",
-      protocol: "https",
-      port: 18443,
-    });
-
-    await appA.close();
-    vi.unstubAllGlobals();
-
-    const appB = Fastify();
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(appB, {
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      BACKOFFICE_ROUTING_STATE_FILE: stateFile,
-    });
-
-    const persistedResponse = await appB.inject({
-      method: "GET",
-      url: "/v1/backoffice/ai-engine/presets",
-    });
-
-    expect(persistedResponse.statusCode).toBe(200);
-    expect(persistedResponse.json()).toMatchObject({
-      presets: expect.arrayContaining([
-        expect.objectContaining({
-          id: createdPreset.id,
-          name: "Relay alternativo v2",
-          host: "10.0.0.26",
-          protocol: "https",
-        }),
-      ]),
-    });
-
-    const deleteResponse = await appB.inject({
-      method: "DELETE",
-      url: `/v1/backoffice/ai-engine/presets/${createdPreset.id}`,
-    });
-
-    expect(deleteResponse.statusCode).toBe(200);
-    expect(deleteResponse.json()).toEqual({ deleted: true, presetId: createdPreset.id });
-
-    await appB.close();
-    await rm(tempDir, { recursive: true, force: true });
-  });
-
-  it("migrates legacy version 2 ai-engine presets preserving their apiPort", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-presets-v2-"));
-    const stateFile = path.join(tempDir, "routing-state.json");
-
-    await writeFile(
-      stateFile,
-      `${JSON.stringify({
-        version: 2,
-        overrides: {},
-        aiEnginePresets: [
-          {
-            id: "legacy-relay",
-            name: "Legacy relay",
-            host: "203.0.113.10",
-            protocol: "http",
-            apiPort: 27001,
-            statsPort: 27000,
-            updatedAt: "2026-04-19T00:00:00.000Z",
-          },
-        ],
-      }, null, 2)}\n`,
-      "utf8",
-    );
-
-    const store = new RoutingStateStore({ BACKOFFICE_ROUTING_STATE_FILE: stateFile } as never);
-    await store.load();
-
-    expect(store.listAiEnginePresets()).toEqual([
-      expect.objectContaining({
-        id: "legacy-relay",
-        host: "203.0.113.10",
-        port: 27001,
-      }),
-    ]);
-
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   it("probes ai-engine runtime targets before activation", async () => {
@@ -4072,13 +3171,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -4122,12 +3221,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -4168,12 +3267,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -4217,12 +3316,12 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
-    }));
+    });
 
     const response = await app.inject({
       method: "POST",
@@ -4260,13 +3359,13 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
       USERS_SERVICE_URL: "http://microservice-users:7102",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
-    }));
+    });
 
     const response = await app.inject({
       method: "GET",
@@ -4280,46 +3379,6 @@ describe("backoffice routes", () => {
       metrics: { status: "ok", version: "1.0.0" },
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://ai-engine-api:7001/health");
-
-    await app.close();
-  });
-
-  it("resets configurable service target overrides back to env defaults", async () => {
-    const app = Fastify();
-
-    vi.stubGlobal("fetch", vi.fn());
-
-    await backofficeRoutes(app, withStateFile({
-      SERVICE_NAME: "bff-backoffice",
-      SERVICE_PORT: 7011,
-      ALLOWED_ORIGINS: "http://localhost:3000",
-      USERS_SERVICE_URL: "http://microservice-users:7102",
-      QUIZZ_SERVICE_URL: "http://microservice-quizz:7100",
-      WORDPASS_SERVICE_URL: "http://microservice-wordpass:7101",
-    }));
-
-    await app.inject({
-      method: "PUT",
-      url: "/v1/backoffice/service-targets/microservice-wordpass",
-      payload: {
-        baseUrl: "https://example.internal:7443",
-        label: "edge backup",
-      },
-    });
-
-    const resetResponse = await app.inject({
-      method: "DELETE",
-      url: "/v1/backoffice/service-targets/microservice-wordpass",
-    });
-
-    expect(resetResponse.statusCode).toBe(200);
-    expect(resetResponse.json()).toMatchObject({
-      service: "microservice-wordpass",
-      source: "env",
-      baseUrl: "http://microservice-wordpass:7101",
-      label: null,
-      updatedAt: null,
-    });
 
     await app.close();
   });
@@ -4356,7 +3415,7 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -4365,7 +3424,7 @@ describe("backoffice routes", () => {
       AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
       AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
-    }));
+    });
 
     await app.inject({ method: "DELETE", url: "/v1/backoffice/ai-engine/target" });
 
@@ -4438,7 +3497,7 @@ describe("backoffice routes", () => {
 
     vi.stubGlobal("fetch", fetchMock);
 
-    await backofficeRoutes(app, withStateFile({
+    await backofficeRoutes(app, {
       SERVICE_NAME: "bff-backoffice",
       SERVICE_PORT: 7011,
       ALLOWED_ORIGINS: "http://localhost:3000",
@@ -4447,7 +3506,7 @@ describe("backoffice routes", () => {
       AI_ENGINE_STATS_URL: "http://ai-engine-stats:7000",
       AI_ENGINE_API_URL: "http://ai-engine-api:7001",
       AI_ENGINE_BRIDGE_API_KEY: "bridge-key-123",
-    }));
+    });
 
     await app.inject({
       method: "PUT",

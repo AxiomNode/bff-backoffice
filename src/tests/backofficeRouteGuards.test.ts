@@ -5,7 +5,6 @@ import {
   getDataDeleteRequestOrReply,
   getDataMutationRequestOrReply,
   getDataUpdateRequestOrReply,
-  getConfigurableServiceTargetKeyOrReply,
   getEditableGameServiceOrReply,
   getGenerationProcessesRequestOrReply,
   getGenerationStartRequestOrReply,
@@ -45,7 +44,7 @@ describe("backofficeRouteGuards", () => {
     await app.close();
   });
 
-  it("writes 400 responses for invalid service and configurable service keys", async () => {
+  it("writes 400 responses for an invalid service key", async () => {
     const app = Fastify();
 
     app.get("/service", async (_request, reply) => {
@@ -57,22 +56,10 @@ describe("backofficeRouteGuards", () => {
       return reply.send({ service });
     });
 
-    app.get("/configurable", async (_request, reply) => {
-      const service = getConfigurableServiceTargetKeyOrReply(reply, "not-real");
-      if (!service) {
-        return;
-      }
-
-      return reply.send({ service });
-    });
-
     const invalidService = await app.inject({ method: "GET", url: "/service" });
-    const invalidConfigurable = await app.inject({ method: "GET", url: "/configurable" });
 
     expect(invalidService.statusCode).toBe(400);
     expect(invalidService.json()).toEqual({ message: "Invalid service" });
-    expect(invalidConfigurable.statusCode).toBe(400);
-    expect(invalidConfigurable.json()).toEqual({ message: "Invalid configurable service" });
 
     await app.close();
   });

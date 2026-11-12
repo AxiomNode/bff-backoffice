@@ -20,17 +20,15 @@ After startup, validate:
 
 - `GET /health`
 - one monitor or leaderboard route
-- one service-target read path
-- one AI target or preset-management path when routing controls are enabled
+- `GET /v1/backoffice/ai-engine/target` when the llama target control is used
 
 ## Runtime-state checks
 
 When targeting behavior is inconsistent, verify:
 
-- `BACKOFFICE_ROUTING_STATE_FILE`
-- effective contents of persisted presets and service-target overrides
-- reachability of the gateway synchronization endpoint
-- allowlist behavior for generic service-target overrides
+- effective llama target returned by `GET /v1/backoffice/ai-engine/target`
+- reachability of `ai-engine-api` `/internal/admin/llama-target`
+- `ALLOWED_ROUTING_TARGET_HOSTS` allowlist behavior for target changes
 
 ## Common failure patterns
 

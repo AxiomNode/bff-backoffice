@@ -1,5 +1,4 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { randomUUID } from "node:crypto";
 import { LeaderboardQuerySchema } from "@axiomnode/shared-sdk-client";
 import {
   CircuitBreaker,
@@ -10,27 +9,17 @@ import {
 import { z } from "zod";
 
 import { isDevelopmentLikeEnv, type AppConfig } from "../config.js";
-import { fetchKubernetesOverview } from "../services/kubernetesObservability.js";
 import { ServiceMetrics } from "../services/serviceMetrics.js";
 import {
-  RoutingStateStore,
-  type PersistedAiEnginePreset,
-  type PersistedRoutingServiceKey,
-  type PersistedRoutingOverride,
-} from "../services/routingStateStore.js";
-import {
-  CONFIGURABLE_SERVICE_TARGET_KEYS,
   getDataDeleteRequestOrReply,
   getDataMutationRequestOrReply,
   getDataUpdateRequestOrReply,
-  getConfigurableServiceTargetKeyOrReply,
   getEditableGameServiceOrReply,
   getGenerationProcessesRequestOrReply,
   getGenerationStartRequestOrReply,
   getGenerationTaskRequestOrReply,
   getGenerationWorkerStartRequestOrReply,
   getServiceKeyOrReply,
-  type ConfigurableServiceTargetKey,
   type GenerationProcessStartPayload,
   type GenerationWorkerStartPayload,
   type ServiceKey,
@@ -56,11 +45,6 @@ type HistoryDatasetInsights = {
   categories: HistoryCategoryInsight[];
   deficitCategories: HistoryCategoryInsight[];
 };
-
-const ServiceTargetOverrideSchema = z.object({
-  baseUrl: z.string().trim().url(),
-  label: z.string().trim().max(80).optional(),
-});
 
 const DataQuerySchema = z.object({
   dataset: z.enum(["roles", "leaderboard", "history", "processes"]),
@@ -216,26 +200,11 @@ const AiEngineTargetSchema = z.object({
   label: z.string().trim().max(80).optional(),
 });
 
-const AiEnginePresetSchema = z.object({
-  name: z.string().trim().min(1).max(80),
-  host: z.string().trim().min(1).max(255),
-  protocol: z.enum(["http", "https"]).default("http"),
-  port: z.coerce.number().int().min(1).max(65535).default(7002),
-});
-
-const AiEnginePresetIdParamsSchema = z.object({
-  presetId: z.string().trim().min(1).max(120),
-});
-
 type NormalizedAiEngineTargetInput = {
   host: string;
   protocol: "http" | "https";
   port: number;
   label?: string;
-};
-
-type NormalizedAiEnginePresetInput = NormalizedAiEngineTargetInput & {
-  name: string;
 };
 
 type AiEngineProbeEndpointStatus = {
@@ -337,34 +306,8 @@ function normalizeAiEngineTargetInput(input: z.infer<typeof AiEngineTargetSchema
   };
 }
 
-function normalizeAiEnginePresetInput(input: z.infer<typeof AiEnginePresetSchema>): NormalizedAiEnginePresetInput {
-  const target = normalizeAiEngineTargetInput({
-    host: input.host,
-    protocol: input.protocol,
-    port: input.port,
-  });
-
-  return {
-    ...target,
-    name: input.name,
-  };
-}
-
 function buildAiEngineBaseUrl(protocol: "http" | "https", host: string, port: number): string {
   return `${protocol}://${host}:${port}`;
-}
-
-function normalizeServiceBaseUrl(raw: string): string {
-  const parsed = new URL(raw.trim());
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("baseUrl must use http or https");
-  }
-
-  if ((parsed.pathname && parsed.pathname !== "/") || parsed.search || parsed.hash) {
-    throw new Error("baseUrl must not include path, query, or hash");
-  }
-
-  return parsed.origin;
 }
 
 function parseIpv4Address(host: string): number | null {
@@ -432,58 +375,6 @@ function assertAllowedRoutingTargetHost(config: AppConfig, host: string): void {
       : `host '${host}' is not allowed: ALLOWED_ROUTING_TARGET_HOSTS is empty and overrides are denied outside development`;
     throw new Error(reason);
   }
-}
-
-function getAiEnginePresetPayload(preset: PersistedAiEnginePreset) {
-  return {
-    id: preset.id,
-    name: preset.name,
-    host: preset.host,
-    protocol: preset.protocol,
-    port: preset.port,
-    updatedAt: preset.updatedAt,
-  };
-}
-
-function getAiEnginePresetList(routingStore: RoutingStateStore) {
-  const presets = routingStore.listAiEnginePresets().map(getAiEnginePresetPayload);
-  return {
-    total: presets.length,
-    presets,
-  };
-}
-
-function getAiEngineActivePresetId(presets: PersistedAiEnginePreset[], target: Record<string, unknown>): string | null {
-  const host = typeof target.host === "string" ? target.host : null;
-  const protocol = target.protocol === "http" || target.protocol === "https" ? target.protocol : "http";
-  const port = typeof target.port === "number" ? target.port : null;
-
-  if (!host || port === null) {
-    return null;
-  }
-
-  return presets.find((entry) => entry.host === host && entry.protocol === protocol && entry.port === port)?.id ?? null;
-}
-
-async function getAiEngineConnectionState(config: AppConfig, routingStore: RoutingStateStore) {
-  const target = await getAiEngineRuntimeTarget(config, routingStore);
-  const presets = routingStore.listAiEnginePresets();
-  const activeConnectionId = getAiEngineActivePresetId(presets, target);
-  const connections = presets.map((preset) => ({
-    ...getAiEnginePresetPayload(preset),
-    active: preset.id === activeConnectionId,
-  }));
-
-  return {
-    total: connections.length,
-    activeConnectionId,
-    target,
-    connections,
-  };
-}
-
-function getServiceCatalogTitle(service: ServiceKey): string {
-  return SERVICE_CATALOG.find((entry) => entry.key === service)?.title ?? service;
 }
 
 function getUpstreamCacheTtlMs(config: AppConfig, path: string): number {
@@ -631,10 +522,12 @@ function isConnectionError(message: string): boolean {
   return /Failed to fetch|NetworkError|timed out|timeout|HTTP\s+(5\d\d|429|408|0)/i.test(message);
 }
 
-function getEnvServiceBaseUrl(config: AppConfig, service: ConfigurableServiceTargetKey): string {
+function serviceBaseUrl(config: AppConfig, service: ServiceKey): string {
   switch (service) {
     case "api-gateway":
       return config.API_GATEWAY_URL ?? "http://localhost:7005";
+    case "bff-backoffice":
+      return `http://localhost:${config.SERVICE_PORT}`;
     case "bff-mobile":
       return config.BFF_MOBILE_URL ?? "http://localhost:7010";
     case "microservice-users":
@@ -648,74 +541,6 @@ function getEnvServiceBaseUrl(config: AppConfig, service: ConfigurableServiceTar
     case "ai-engine-api":
       return config.AI_ENGINE_API_URL ?? "http://localhost:7001";
   }
-}
-
-function getServiceRuntimeTarget(config: AppConfig, routingStore: RoutingStateStore, service: ConfigurableServiceTargetKey) {
-  const override = routingStore.get(service);
-  if (override) {
-    return {
-      service,
-      title: getServiceCatalogTitle(service),
-      source: "override" as const,
-      baseUrl: override.baseUrl,
-      label: override.label ?? null,
-      updatedAt: override.updatedAt,
-    };
-  }
-
-  return {
-    service,
-    title: getServiceCatalogTitle(service),
-    source: "env" as const,
-    baseUrl: getEnvServiceBaseUrl(config, service),
-    label: null,
-    updatedAt: null,
-  };
-}
-
-function getServiceRuntimeTargets(config: AppConfig, routingStore: RoutingStateStore) {
-  return CONFIGURABLE_SERVICE_TARGET_KEYS.map((service) => getServiceRuntimeTarget(config, routingStore, service));
-}
-
-async function applyServiceRuntimeTarget(
-  config: AppConfig,
-  routingStore: RoutingStateStore,
-  service: ConfigurableServiceTargetKey,
-  input: z.infer<typeof ServiceTargetOverrideSchema>,
-): Promise<void> {
-  const normalizedBaseUrl = normalizeServiceBaseUrl(input.baseUrl);
-  assertAllowedRoutingTargetHost(config, new URL(normalizedBaseUrl).hostname);
-
-  const override: PersistedRoutingOverride = {
-    baseUrl: normalizedBaseUrl,
-    label: input.label?.trim() || undefined,
-    updatedAt: new Date().toISOString(),
-  };
-  await routingStore.set(service as PersistedRoutingServiceKey, override);
-}
-
-async function resetServiceRuntimeTarget(routingStore: RoutingStateStore, service: ConfigurableServiceTargetKey): Promise<void> {
-  await routingStore.delete(service as PersistedRoutingServiceKey);
-}
-
-async function saveAiEnginePreset(
-  config: AppConfig,
-  routingStore: RoutingStateStore,
-  presetId: string,
-  input: z.infer<typeof AiEnginePresetSchema>,
-): Promise<PersistedAiEnginePreset> {
-  const normalized = normalizeAiEnginePresetInput(input);
-  assertAllowedRoutingTargetHost(config, normalized.host);
-  const preset: PersistedAiEnginePreset = {
-    id: presetId,
-    name: normalized.name.trim(),
-    host: normalized.host,
-    protocol: normalized.protocol,
-    port: normalized.port,
-    updatedAt: new Date().toISOString(),
-  };
-  await routingStore.setAiEnginePreset(preset);
-  return preset;
 }
 
 async function probeAiEngineEndpoint(
@@ -819,9 +644,8 @@ function parseAiEngineJson(text: string, description: string): Record<string, un
 
 async function getAiEngineRuntimeTarget(
   config: AppConfig,
-  routingStore: RoutingStateStore,
 ): Promise<Record<string, unknown>> {
-  const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/internal/admin/llama-target", {});
+  const targetUrl = buildUrl(serviceBaseUrl(config, "ai-engine-api"), "/internal/admin/llama-target", {});
   const headers: Record<string, string> = {};
 
   const serviceApiKey = resolveServiceApiKey(config, "ai-engine-api");
@@ -844,9 +668,8 @@ async function getAiEngineRuntimeTarget(
 
 async function getAiEnginePluginCapabilities(
   config: AppConfig,
-  routingStore: RoutingStateStore,
 ): Promise<Record<string, unknown>> {
-  const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/internal/plugin/capabilities", {});
+  const targetUrl = buildUrl(serviceBaseUrl(config, "ai-engine-api"), "/internal/plugin/capabilities", {});
   const headers: Record<string, string> = {};
 
   const serviceApiKey = resolveServiceApiKey(config, "ai-engine-api");
@@ -870,7 +693,6 @@ async function getAiEnginePluginCapabilities(
 
 async function syncAiEngineLlamaTarget(
   config: AppConfig,
-  routingStore: RoutingStateStore,
   method: "PUT" | "DELETE",
   body?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
@@ -878,7 +700,7 @@ async function syncAiEngineLlamaTarget(
     assertAllowedRoutingTargetHost(config, body.host);
   }
 
-  const targetUrl = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/internal/admin/llama-target", {});
+  const targetUrl = buildUrl(serviceBaseUrl(config, "ai-engine-api"), "/internal/admin/llama-target", {});
   const headers: Record<string, string> = {};
 
   const serviceApiKey = resolveServiceApiKey(config, "ai-engine-api");
@@ -1147,19 +969,6 @@ function parseHistoryInsightsPayload(payload: unknown): HistoryInsightsGroup[] |
   return groups;
 }
 
-function serviceBaseUrl(config: AppConfig, routingStore: RoutingStateStore, service: ServiceKey): string {
-  if (CONFIGURABLE_SERVICE_TARGET_KEYS.includes(service as ConfigurableServiceTargetKey)) {
-    return getServiceRuntimeTarget(config, routingStore, service as ConfigurableServiceTargetKey).baseUrl;
-  }
-
-  switch (service) {
-    case "bff-backoffice":
-      return `http://localhost:${config.SERVICE_PORT}`;
-  }
-
-  throw new Error(`Unsupported service '${service}'`);
-}
-
 function resolveServiceApiKey(config: AppConfig, service: ServiceKey): string | undefined {
   if (service === "ai-engine-stats") {
     return config.AI_ENGINE_BRIDGE_API_KEY || config.AI_ENGINE_API_KEY;
@@ -1175,7 +984,6 @@ function resolveServiceApiKey(config: AppConfig, service: ServiceKey): string | 
 async function fetchJsonFromService(
   service: ServiceKey,
   config: AppConfig,
-  routingStore: RoutingStateStore,
   path: string,
   request: FastifyRequest,
   upstreamCache: Map<string, CachedUpstreamResponse>,
@@ -1185,7 +993,7 @@ async function fetchJsonFromService(
   const headers = normalizeForwardHeaders(request, {
     deriveAuthorizationFromFirebaseIdToken: service === "microservice-users",
   });
-  const target = buildUrl(serviceBaseUrl(config, routingStore, service), path, {});
+  const target = buildUrl(serviceBaseUrl(config, service), path, {});
   const outgoingHeaders: Record<string, string> = {};
   if (headers.authorization) {
     outgoingHeaders.authorization = headers.authorization;
@@ -1263,7 +1071,6 @@ async function fetchJsonFromService(
 async function fetchMetricsSnapshot(
   service: ServiceKey,
   config: AppConfig,
-  routingStore: RoutingStateStore,
   request: FastifyRequest,
   runtimeMetrics: Pick<ServiceMetrics, "snapshot">,
   upstreamCache: Map<string, CachedUpstreamResponse>,
@@ -1275,14 +1082,14 @@ async function fetchMetricsSnapshot(
   }
 
   if (service === "ai-engine-stats") {
-    return fetchJsonFromService(service, config, routingStore, "/stats", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
+    return fetchJsonFromService(service, config, "/stats", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
   }
 
   if (service === "ai-engine-api") {
-    return fetchJsonFromService(service, config, routingStore, "/health", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
+    return fetchJsonFromService(service, config, "/health", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
   }
 
-  return fetchJsonFromService(service, config, routingStore, "/monitor/stats", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
+  return fetchJsonFromService(service, config, "/monitor/stats", request, upstreamCache, upstreamBreakers, timeoutOverrideMs);
 }
 
 async function forwardRequest(
@@ -1314,7 +1121,6 @@ async function readDatasetRows(
   dataset: DataQueryDataset,
   query: z.infer<typeof DataQuerySchema>,
   config: AppConfig,
-  routingStore: RoutingStateStore,
   request: FastifyRequest,
   upstreamCache: Map<string, CachedUpstreamResponse>,
   upstreamBreakers: Map<string, CircuitBreaker>,
@@ -1323,7 +1129,6 @@ async function readDatasetRows(
     const payload = (await fetchJsonFromService(
       service,
       config,
-      routingStore,
       "/users/admin/roles",
       request,
       upstreamCache,
@@ -1337,7 +1142,7 @@ async function readDatasetRows(
   if (service === "microservice-users" && dataset === "leaderboard") {
     const upstreamLimit = Math.min(query.limit, 100);
     const path = `/users/leaderboard?metric=${encodeURIComponent(query.metric)}&limit=${upstreamLimit}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as {
+    const payload = (await fetchJsonFromService(service, config, path, request, upstreamCache, upstreamBreakers)) as {
       rows?: Array<Record<string, unknown>>;
       metric?: string;
     };
@@ -1364,7 +1169,7 @@ async function readDatasetRows(
       params.set("status", query.status);
     }
     const path = `/games/history?${params.toString()}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as {
+    const payload = (await fetchJsonFromService(service, config, path, request, upstreamCache, upstreamBreakers)) as {
       items?: Array<Record<string, unknown>>;
       total?: number;
       page?: number;
@@ -1387,7 +1192,7 @@ async function readDatasetRows(
       params.set("requestedBy", query.requestedBy);
     }
     const path = `/games/generate/processes?${params.toString()}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as { tasks?: Array<Record<string, unknown>> };
+    const payload = (await fetchJsonFromService(service, config, path, request, upstreamCache, upstreamBreakers)) as { tasks?: Array<Record<string, unknown>> };
     return { rows: payload.tasks ?? [] };
   }
 
@@ -1407,7 +1212,7 @@ async function readDatasetRows(
       params.set("status", query.status);
     }
     const path = `/games/history?${params.toString()}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as {
+    const payload = (await fetchJsonFromService(service, config, path, request, upstreamCache, upstreamBreakers)) as {
       items?: Array<Record<string, unknown>>;
       total?: number;
       page?: number;
@@ -1430,7 +1235,7 @@ async function readDatasetRows(
       params.set("requestedBy", query.requestedBy);
     }
     const path = `/games/generate/processes?${params.toString()}`;
-    const payload = (await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers)) as { tasks?: Array<Record<string, unknown>> };
+    const payload = (await fetchJsonFromService(service, config, path, request, upstreamCache, upstreamBreakers)) as { tasks?: Array<Record<string, unknown>> };
     return { rows: payload.tasks ?? [] };
   }
 
@@ -1449,7 +1254,6 @@ async function readHistoryInsightsAggregate(
   service: ServiceKey,
   query: z.infer<typeof DataQuerySchema>,
   config: AppConfig,
-  routingStore: RoutingStateStore,
   request: FastifyRequest,
   upstreamCache: Map<string, CachedUpstreamResponse>,
   upstreamBreakers: Map<string, CircuitBreaker>,
@@ -1475,9 +1279,7 @@ async function readHistoryInsightsAggregate(
   try {
     payload = await fetchJsonFromService(
       service,
-      config,
-      routingStore,
-      `/games/history/insights${suffix}`,
+      config,      `/games/history/insights${suffix}`,
       request,
       upstreamCache,
       upstreamBreakers,
@@ -1503,7 +1305,6 @@ async function readCompleteHistoryRows(
   query: z.infer<typeof DataQuerySchema>,
   initialResult: { rows: Row[]; total?: number; page?: number; pageSize?: number },
   config: AppConfig,
-  routingStore: RoutingStateStore,
   request: FastifyRequest,
   upstreamCache: Map<string, CachedUpstreamResponse>,
   upstreamBreakers: Map<string, CircuitBreaker>,
@@ -1519,7 +1320,6 @@ async function readCompleteHistoryRows(
     "history",
     { ...query, page: 1, pageSize },
     config,
-    routingStore,
     request,
     upstreamCache,
     upstreamBreakers,
@@ -1538,7 +1338,6 @@ async function readCompleteHistoryRows(
       "history",
       { ...query, page, pageSize },
       config,
-      routingStore,
       request,
       upstreamCache,
       upstreamBreakers,
@@ -1559,8 +1358,6 @@ export async function backofficeRoutes(
   metrics?: ServiceMetrics,
 ): Promise<void> {
   const upstreamTimeoutMs = config.UPSTREAM_TIMEOUT_MS ?? 15000;
-  const routingStore = new RoutingStateStore(config);
-  await routingStore.load();
   const historyInsightsUnsupportedUntil = new Map<ServiceKey, number>();
 
   const runtimeMetrics = metrics ?? {
@@ -1613,7 +1410,6 @@ export async function backofficeRoutes(
             const metricsPayload = await fetchMetricsSnapshot(
               service.key,
               config,
-              routingStore,
               request,
               runtimeMetrics,
               upstreamCache,
@@ -1707,217 +1503,17 @@ export async function backofficeRoutes(
     }
   });
 
-  app.get("/v1/backoffice/kubernetes/overview", async (_request, reply) => {
-    try {
-      return reply.send(await fetchKubernetesOverview(config));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      return reply.status(503).send({
-        message: "Failed to load Kubernetes overview",
-        error: message,
-      });
-    }
-  });
-
-  app.get("/v1/backoffice/service-targets", async (_request, reply) => {
-    await routingStore.load();
-    const targets = getServiceRuntimeTargets(config, routingStore);
-    return reply.send({
-      total: targets.length,
-      targets,
-    });
-  });
-
-  app.get("/v1/backoffice/routing/history", async (request, reply) => {
-    const parsedLogs = LogsQuerySchema.safeParse(request.query ?? {});
-    if (!parsedLogs.success) {
-      return reply.status(400).send({
-        message: "Invalid query parameters",
-        errors: parsedLogs.error.flatten(),
-      });
-    }
-
-    const entries = await routingStore.listHistory(parsedLogs.data.limit);
-    return reply.send({
-      total: entries.length,
-      history: entries,
-    });
-  });
-
-  app.get("/v1/backoffice/service-targets/:service", async (request, reply) => {
-    await routingStore.load();
-    const service = getConfigurableServiceTargetKeyOrReply(
-      reply,
-      (request.params as { service?: string } | undefined)?.service,
-    );
-    if (!service) {
-      return;
-    }
-
-    return reply.send(getServiceRuntimeTarget(config, routingStore, service));
-  });
-
-  app.put("/v1/backoffice/service-targets/:service", async (request, reply) => {
-    const service = getConfigurableServiceTargetKeyOrReply(
-      reply,
-      (request.params as { service?: string } | undefined)?.service,
-    );
-    if (!service) {
-      return;
-    }
-
-    /* v8 ignore next -- Fastify always materializes request.body for matched JSON routes; the nullish fallback is defensive only */
-    const parsedPayload = ServiceTargetOverrideSchema.safeParse(request.body ?? {});
-    if (!parsedPayload.success) {
-      return reply.status(400).send({
-        message: "Invalid payload",
-        errors: parsedPayload.error.flatten(),
-      });
-    }
-
-    try {
-      await applyServiceRuntimeTarget(config, routingStore, service, parsedPayload.data);
-      clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
-      return reply.send(getServiceRuntimeTarget(config, routingStore, service));
-    } catch (error) {
-      return reply.status(400).send({
-        /* v8 ignore next -- runtime throws are Error instances in the covered paths; string fallback is defensive only */
-        message: error instanceof Error ? error.message : "Invalid service target",
-      });
-    }
-  });
-
-  app.delete("/v1/backoffice/service-targets/:service", async (request, reply) => {
-    const service = getConfigurableServiceTargetKeyOrReply(
-      reply,
-      (request.params as { service?: string } | undefined)?.service,
-    );
-    if (!service) {
-      return;
-    }
-
-    await resetServiceRuntimeTarget(routingStore, service);
-    clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
-    return reply.send(getServiceRuntimeTarget(config, routingStore, service));
-  });
-
   app.get("/v1/backoffice/ai-engine/target", async (_request, reply) => {
-    await routingStore.load();
-    return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
+    return reply.send(await getAiEngineRuntimeTarget(config));
   });
 
   app.get("/v1/backoffice/ai-engine/plugin/capabilities", async (_request, reply) => {
     try {
-      await routingStore.load();
-      return reply.send(await getAiEnginePluginCapabilities(config, routingStore));
+      return reply.send(await getAiEnginePluginCapabilities(config));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return reply.status(502).send({ message: `ai-engine-api unreachable: ${message}` });
     }
-  });
-
-  app.get("/v1/backoffice/ai-engine/connections", async (_request, reply) => {
-    await routingStore.load();
-    return reply.send(await getAiEngineConnectionState(config, routingStore));
-  });
-
-  app.post("/v1/backoffice/ai-engine/connections", async (request, reply) => {
-    const parsed = AiEnginePresetSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      return reply.status(400).send({
-        message: "Invalid payload",
-        errors: parsed.error.flatten(),
-      });
-    }
-
-    try {
-      await saveAiEnginePreset(config, routingStore, randomUUID(), parsed.data);
-      return reply.status(201).send(await getAiEngineConnectionState(config, routingStore));
-    } catch (error) {
-      return reply.status(400).send({
-        message: error instanceof Error ? error.message : "Invalid ai-engine connection",
-      });
-    }
-  });
-
-  app.put("/v1/backoffice/ai-engine/connections/:presetId", async (request, reply) => {
-    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
-    if (!parsedParams.success) {
-      /* v8 ignore next -- malformed connection ids are rejected by routing before this branch is reachable in integration tests */
-      return reply.status(400).send({ message: "Invalid connection id" });
-    }
-
-    const parsedBody = AiEnginePresetSchema.safeParse(request.body ?? {});
-    if (!parsedBody.success) {
-      return reply.status(400).send({
-        message: "Invalid payload",
-        errors: parsedBody.error.flatten(),
-      });
-    }
-
-    await routingStore.load();
-    const exists = routingStore.listAiEnginePresets().some((entry) => entry.id === parsedParams.data.presetId);
-    if (!exists) {
-      return reply.status(404).send({ message: "Connection not found" });
-    }
-
-    try {
-      await saveAiEnginePreset(config, routingStore, parsedParams.data.presetId, parsedBody.data);
-      return reply.send(await getAiEngineConnectionState(config, routingStore));
-    } catch (error) {
-      return reply.status(400).send({
-        message: error instanceof Error ? error.message : "Invalid ai-engine connection",
-      });
-    }
-  });
-
-  app.delete("/v1/backoffice/ai-engine/connections/:presetId", async (request, reply) => {
-    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
-    if (!parsedParams.success) {
-      return reply.status(400).send({ message: "Invalid connection id" });
-    }
-
-    const deleted = await routingStore.deleteAiEnginePreset(parsedParams.data.presetId);
-    if (!deleted) {
-      return reply.status(404).send({ message: "Connection not found" });
-    }
-
-    return reply.send(await getAiEngineConnectionState(config, routingStore));
-  });
-
-  app.post("/v1/backoffice/ai-engine/connections/:presetId/activate", async (request, reply) => {
-    await routingStore.load();
-    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
-    /* v8 ignore start -- malformed connection ids are rejected by routing before this branch is reachable in integration tests */
-    if (!parsedParams.success) {
-      return reply.status(400).send({ message: "Invalid connection id" });
-    }
-    /* v8 ignore stop */
-
-    const preset = routingStore.listAiEnginePresets().find((entry) => entry.id === parsedParams.data.presetId);
-    if (!preset) {
-      return reply.status(404).send({ message: "Connection not found" });
-    }
-
-    try {
-      await syncAiEngineLlamaTarget(config, routingStore, "PUT", {
-        host: preset.host,
-        protocol: preset.protocol,
-        port: preset.port,
-        label: preset.name,
-      });
-      clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
-      return reply.send(await getAiEngineConnectionState(config, routingStore));
-    } catch (error) {
-      return reply.status(400).send({
-        message: error instanceof Error ? error.message : "Invalid ai-engine connection",
-      });
-    }
-  });
-
-  app.get("/v1/backoffice/ai-engine/presets", async (_request, reply) => {
-    await routingStore.load();
-    return reply.send(getAiEnginePresetList(routingStore));
   });
 
   app.post("/v1/backoffice/ai-engine/probe", async (request, reply) => {
@@ -1941,77 +1537,6 @@ export async function backofficeRoutes(
     }
   });
 
-  app.post("/v1/backoffice/ai-engine/presets", async (request, reply) => {
-    /* v8 ignore next -- Fastify always materializes request.body for matched JSON routes; the nullish fallback is defensive only */
-    const parsed = AiEnginePresetSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      return reply.status(400).send({
-        message: "Invalid payload",
-        errors: parsed.error.flatten(),
-      });
-    }
-
-    try {
-      const preset = await saveAiEnginePreset(config, routingStore, randomUUID(), parsed.data);
-      return reply.status(201).send(getAiEnginePresetPayload(preset));
-    } catch (error) {
-      return reply.status(400).send({
-        /* v8 ignore next -- runtime throws are Error instances in the covered paths; string fallback is defensive only */
-        message: error instanceof Error ? error.message : "Invalid ai-engine preset",
-      });
-    }
-  });
-
-  app.put("/v1/backoffice/ai-engine/presets/:presetId", async (request, reply) => {
-    /* v8 ignore next -- matched Fastify routes always provide params; the nullish fallback is defensive only */
-    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
-    /* v8 ignore start -- malformed preset ids are rejected by routing before this branch is reachable in integration tests */
-    if (!parsedParams.success) {
-      return reply.status(400).send({ message: "Invalid preset id" });
-    }
-    /* v8 ignore stop */
-
-    /* v8 ignore next -- Fastify always materializes request.body for matched JSON routes; the nullish fallback is defensive only */
-    const parsedBody = AiEnginePresetSchema.safeParse(request.body ?? {});
-    if (!parsedBody.success) {
-      return reply.status(400).send({
-        message: "Invalid payload",
-        errors: parsedBody.error.flatten(),
-      });
-    }
-
-    await routingStore.load();
-    const exists = routingStore.listAiEnginePresets().some((entry) => entry.id === parsedParams.data.presetId);
-    if (!exists) {
-      return reply.status(404).send({ message: "Preset not found" });
-    }
-
-    try {
-      const preset = await saveAiEnginePreset(config, routingStore, parsedParams.data.presetId, parsedBody.data);
-      return reply.send(getAiEnginePresetPayload(preset));
-    } catch (error) {
-      return reply.status(400).send({
-        /* v8 ignore next -- runtime throws are Error instances in the covered paths; string fallback is defensive only */
-        message: error instanceof Error ? error.message : "Invalid ai-engine preset",
-      });
-    }
-  });
-
-  app.delete("/v1/backoffice/ai-engine/presets/:presetId", async (request, reply) => {
-    /* v8 ignore next -- matched Fastify routes always provide params; the nullish fallback is defensive only */
-    const parsedParams = AiEnginePresetIdParamsSchema.safeParse(request.params ?? {});
-    if (!parsedParams.success) {
-      return reply.status(400).send({ message: "Invalid preset id" });
-    }
-
-    const deleted = await routingStore.deleteAiEnginePreset(parsedParams.data.presetId);
-    if (!deleted) {
-      return reply.status(404).send({ message: "Preset not found" });
-    }
-
-    return reply.send({ deleted: true, presetId: parsedParams.data.presetId });
-  });
-
   app.put("/v1/backoffice/ai-engine/target", async (request, reply) => {
     /* v8 ignore next -- Fastify always materializes request.body for matched JSON routes; the nullish fallback is defensive only */
     const parsed = AiEngineTargetSchema.safeParse(request.body ?? {});
@@ -2023,9 +1548,9 @@ export async function backofficeRoutes(
     }
 
     try {
-      await syncAiEngineLlamaTarget(config, routingStore, "PUT", normalizeAiEngineTargetInput(parsed.data));
+      await syncAiEngineLlamaTarget(config, "PUT", normalizeAiEngineTargetInput(parsed.data));
       clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
-      return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
+      return reply.send(await getAiEngineRuntimeTarget(config));
     } catch (error) {
       return reply.status(400).send({
         /* v8 ignore next -- runtime throws are Error instances in the covered paths; string fallback is defensive only */
@@ -2036,9 +1561,9 @@ export async function backofficeRoutes(
 
   app.delete("/v1/backoffice/ai-engine/target", async (_request, reply) => {
     try {
-      await syncAiEngineLlamaTarget(config, routingStore, "DELETE");
+      await syncAiEngineLlamaTarget(config, "DELETE");
       clearUpstreamRuntimeState(upstreamCache, upstreamBreakers);
-      return reply.send(await getAiEngineRuntimeTarget(config, routingStore));
+      return reply.send(await getAiEngineRuntimeTarget(config));
     } catch (error) {
       return reply.status(400).send({
         /* v8 ignore next -- runtime throws are Error instances in the covered paths; string fallback is defensive only */
@@ -2119,7 +1644,6 @@ export async function backofficeRoutes(
     const payload = await fetchMetricsSnapshot(
       service,
       config,
-      routingStore,
       request,
       runtimeMetrics,
       upstreamCache,
@@ -2155,7 +1679,7 @@ export async function backofficeRoutes(
 
     if (service === "ai-engine-stats") {
       const path = `/stats/history?last_n=${limit}`;
-      const payload = await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
+      const payload = await fetchJsonFromService(service, config, path, request, upstreamCache, upstreamBreakers);
       return reply.send({ service, logs: payload });
     }
 
@@ -2169,7 +1693,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/monitor/logs?limit=${limit}`;
-    const payload = await fetchJsonFromService(service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
+    const payload = await fetchJsonFromService(service, config, path, request, upstreamCache, upstreamBreakers);
     return reply.send({ service, logs: payload });
   });
 
@@ -2201,7 +1725,6 @@ export async function backofficeRoutes(
       query.dataset,
       query,
       config,
-      routingStore,
       request,
       upstreamCache,
       upstreamBreakers,
@@ -2231,9 +1754,7 @@ export async function backofficeRoutes(
       const aggregated = await readHistoryInsightsAggregate(
         service,
         query,
-        config,
-        routingStore,
-        request,
+        config,        request,
         upstreamCache,
         upstreamBreakers,
         historyInsightsUnsupportedUntil,
@@ -2245,9 +1766,7 @@ export async function backofficeRoutes(
           service,
           query,
           dataResult,
-          config,
-          routingStore,
-          request,
+          config,          request,
           upstreamCache,
           upstreamBreakers,
         );
@@ -2278,7 +1797,7 @@ export async function backofficeRoutes(
       return;
     }
 
-    const payload = await fetchJsonFromService(service, config, routingStore, "/catalogs", request, upstreamCache, upstreamBreakers);
+    const payload = await fetchJsonFromService(service, config, "/catalogs", request, upstreamCache, upstreamBreakers);
     return reply.send({
       service,
       catalogs: payload,
@@ -2291,7 +1810,7 @@ export async function backofficeRoutes(
       return;
     }
 
-    const url = buildUrl(serviceBaseUrl(config, routingStore, requestData.service), "/games/history/manual", {});
+    const url = buildUrl(serviceBaseUrl(config, requestData.service), "/games/history/manual", {});
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, requestData.payload);
   });
 
@@ -2302,7 +1821,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/history/${encodeURIComponent(requestData.entryId)}`;
-    const url = buildUrl(serviceBaseUrl(config, routingStore, requestData.service), path, {});
+    const url = buildUrl(serviceBaseUrl(config, requestData.service), path, {});
     await forwardRequest(request, reply, url, "PATCH", upstreamTimeoutMs, requestData.payload);
   });
 
@@ -2312,7 +1831,7 @@ export async function backofficeRoutes(
       return;
     }
 
-    const url = buildUrl(serviceBaseUrl(config, routingStore, requestData.service), "/games/generate/process", {});
+    const url = buildUrl(serviceBaseUrl(config, requestData.service), "/games/generate/process", {});
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, normalizeGenerationProcessPayload(requestData.payload));
   });
 
@@ -2322,7 +1841,7 @@ export async function backofficeRoutes(
       return;
     }
 
-    const url = buildUrl(serviceBaseUrl(config, routingStore, requestData.service), "/games/generate/process/wait", {});
+    const url = buildUrl(serviceBaseUrl(config, requestData.service), "/games/generate/process/wait", {});
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs, normalizeGenerationProcessPayload(requestData.payload));
   });
 
@@ -2342,7 +1861,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/generate/processes?${query.toString()}`;
-    const payload = await fetchJsonFromService(requestData.service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
+    const payload = await fetchJsonFromService(requestData.service, config, path, request, upstreamCache, upstreamBreakers);
     return reply.send(payload);
   });
 
@@ -2353,7 +1872,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/generate/process/${encodeURIComponent(requestData.taskId)}?includeItems=${requestData.includeItems}`;
-    const payload = await fetchJsonFromService(requestData.service, config, routingStore, path, request, upstreamCache, upstreamBreakers);
+    const payload = await fetchJsonFromService(requestData.service, config, path, request, upstreamCache, upstreamBreakers);
     return reply.send(payload);
   });
 
@@ -2371,7 +1890,6 @@ export async function backofficeRoutes(
       const payload = await fetchJsonFromService(
         service,
         config,
-        routingStore,
         "/games/generate/worker",
         request,
         upstreamCache,
@@ -2393,7 +1911,7 @@ export async function backofficeRoutes(
     }
 
     const url = buildUrl(
-      serviceBaseUrl(config, routingStore, requestData.service),
+      serviceBaseUrl(config, requestData.service),
       "/games/generate/worker/start",
       {},
     );
@@ -2417,7 +1935,7 @@ export async function backofficeRoutes(
       return;
     }
 
-    const url = buildUrl(serviceBaseUrl(config, routingStore, service), "/games/generate/worker/stop", {});
+    const url = buildUrl(serviceBaseUrl(config, service), "/games/generate/worker/stop", {});
     await forwardRequest(request, reply, url, "POST", upstreamTimeoutMs);
   });
 
@@ -2428,7 +1946,7 @@ export async function backofficeRoutes(
     }
 
     const path = `/games/history/${encodeURIComponent(requestData.entryId)}`;
-    const url = buildUrl(serviceBaseUrl(config, routingStore, requestData.service), path, {});
+    const url = buildUrl(serviceBaseUrl(config, requestData.service), path, {});
     await forwardRequest(request, reply, url, "DELETE", upstreamTimeoutMs);
   });
 
@@ -2441,7 +1959,6 @@ export async function backofficeRoutes(
       const payload = await fetchJsonFromService(
         "ai-engine-api",
         config,
-        routingStore,
         "/diagnostics/rag/stats",
         request,
         upstreamCache,
@@ -2456,7 +1973,7 @@ export async function backofficeRoutes(
 
   app.post("/v1/backoffice/ai-diagnostics/tests/run", async (request, reply) => {
     try {
-      const url = buildUrl(serviceBaseUrl(config, routingStore, "ai-engine-api"), "/diagnostics/tests/run", {});
+      const url = buildUrl(serviceBaseUrl(config, "ai-engine-api"), "/diagnostics/tests/run", {});
       const normalizedHeaders = normalizeForwardHeaders(request);
       const requestHeaders: Record<string, string | undefined> = {
         ...normalizedHeaders,
@@ -2488,7 +2005,6 @@ export async function backofficeRoutes(
       const payload = await fetchJsonFromService(
         "ai-engine-api",
         config,
-        routingStore,
         "/diagnostics/tests/status",
         request,
         upstreamCache,

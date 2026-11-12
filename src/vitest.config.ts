@@ -6,7 +6,7 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "json-summary", "html", "lcov"],
       include: ["app/**/*.ts"],
-      exclude: ["app/server.ts", "app/services/kubernetesObservability.ts", "tests/**", "dist/**", "**/*.d.ts"],
+      exclude: ["app/server.ts", "tests/**", "dist/**", "**/*.d.ts"],
       thresholds: {
         lines: 90,
         statements: 90,

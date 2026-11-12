@@ -9,7 +9,7 @@ Technical documentation for the backoffice BFF service.
 This local docs folder explains the concrete implementation surface of `bff-backoffice`:
 
 - operator-facing orchestration behavior
-- repository-owned runtime routing state and synchronization behavior
+- the ai-engine llama target control and its allowlist
 - local operational workflow for diagnostics and targeting features
 
 ## Navigation

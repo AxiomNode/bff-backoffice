@@ -1,7 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import Fastify, { type FastifyInstance } from "fastify";
 
@@ -21,19 +18,13 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-let stateDir = "";
 const apps: FastifyInstance[] = [];
-
-beforeEach(async () => {
-  stateDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-insights-"));
-});
 
 afterEach(async () => {
   vi.unstubAllGlobals();
   while (apps.length > 0) {
     await apps.pop()?.close();
   }
-  await rm(stateDir, { recursive: true, force: true });
 });
 
 async function boot(): Promise<FastifyInstance> {
@@ -47,7 +38,6 @@ async function boot(): Promise<FastifyInstance> {
     QUIZZ_SERVICE_URL: QUIZ,
     WORDPASS_SERVICE_URL: WORDPASS,
     UPSTREAM_METRICS_CACHE_TTL_MS: 0,
-    BACKOFFICE_ROUTING_STATE_FILE: path.join(stateDir, "routing-state.json"),
   } as unknown as AppConfig);
   return app;
 }

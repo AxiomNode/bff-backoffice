@@ -39,23 +39,6 @@ const ADMIN_ROUTE_RULES: Array<{
   },
   {
     test: (method, route) =>
-      ["PUT", "DELETE"].includes(method) && route.startsWith("/v1/backoffice/service-targets/"),
-    category: "routing.target",
-    action: (method, route) => `${method} ${route}`,
-  },
-  {
-    test: (method, route) => route.startsWith("/v1/backoffice/ai-engine/presets"),
-    category: "routing.ai-engine.preset",
-    action: (method, route) => `${method} ${route}`,
-  },
-  {
-    test: (method, route) =>
-      ["POST", "PUT", "DELETE"].includes(method) && route.startsWith("/v1/backoffice/ai-engine/connections"),
-    category: "routing.ai-engine.connection",
-    action: (method, route) => `${method} ${route}`,
-  },
-  {
-    test: (method, route) =>
       ["PUT", "DELETE", "POST"].includes(method) && route.startsWith("/v1/backoffice/ai-engine/target"),
     category: "routing.ai-engine.target",
     action: (method, route) => `${method} ${route}`,

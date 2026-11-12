@@ -21,7 +21,6 @@ beforeEach(async () => {
   vi.stubEnv("API_GATEWAY_URL", "http://api-gateway:7005");
   vi.stubEnv("AI_ENGINE_STATS_URL", "http://ai-engine-stats:7000");
   vi.stubEnv("AI_ENGINE_API_URL", "http://ai-engine-api:7001");
-  vi.stubEnv("BACKOFFICE_ROUTING_STATE_FILE", path.join(tempDir, "routing-state.json"));
   vi.stubEnv("AUDIT_TRAIL_ENABLED", "false");
   vi.stubEnv("AUDIT_TRAIL_DIR", path.join(tempDir, "audit"));
 });

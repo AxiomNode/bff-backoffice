@@ -8,7 +8,7 @@ Backend-for-Frontend service for AxiomNode backoffice operations.
 
 ## Responsibility
 
-`bff-backoffice` is the operational control plane for the backoffice channel. It shields the UI from domain-service details and now also owns part of the runtime routing state used for diagnostics and service targeting.
+`bff-backoffice` is the operational control plane for the backoffice channel. It shields the UI from domain-service details and exposes one narrow runtime control: pointing the ai-engine llama target at another host.
 
 ## Runtime role
 
@@ -30,21 +30,13 @@ flowchart LR
 - Expose admin-focused APIs for monitoring and control workflows.
 - Aggregate and normalize data from internal services.
 - Keep backoffice UI decoupled from domain-service internals.
-- Persist shared runtime routing metadata required by operations.
-- Expose shared ai-engine preset management for all backoffice users.
+- Let operators read, probe, set and reset the ai-engine llama target.
 
 ## Runtime surface
 
 ### Control-plane role
 
-`bff-backoffice` is more than a read-only BFF. It also acts as a narrow runtime control component for operator workflows.
-
-Concrete responsibilities beyond standard orchestration:
-
-- persist service-target overrides shared across operators
-- persist reusable ai-engine destination presets
-- synchronize ai-engine target changes toward `api-gateway`
-- expose effective target state back to the UI
+`bff-backoffice` is more than a read-only BFF: it also exposes a narrow control for the ai-engine llama target. The BFF keeps no routing state of its own; the target is persisted by `ai-engine` (`/internal/admin/llama-target`) and every change is recorded in the audit trail.
 
 ### Role-facing admin routes
 
@@ -68,8 +60,7 @@ Operator-facing diagnostics semantics and runtime-control behavior are documente
 ### Primary operational use cases
 
 - inspect service health and operational summaries
-- manage shared routing overrides and ai-engine presets
-- synchronize effective ai-engine runtime changes toward `api-gateway`
+- read, probe, set and reset the ai-engine llama target
 
 ### Local development
 
@@ -80,14 +71,12 @@ Operator-facing diagnostics semantics and runtime-control behavior are documente
 
 ### Route note
 
-This service owns backoffice-facing diagnostics, target-management, and ai-engine preset routes. Use `docs/architecture/README.md` and the operations capability dossiers for the concrete inventory.
+This service owns backoffice-facing diagnostics, the ai-engine target routes (`GET/PUT/DELETE /v1/backoffice/ai-engine/target`, `POST /v1/backoffice/ai-engine/probe`) and the ai-engine plugin capabilities readback. Use `docs/architecture/README.md` and the operations capability dossiers for the concrete inventory.
 
 ### Runtime state model
 
-- Upstream service overrides are stored in `BACKOFFICE_ROUTING_STATE_FILE`.
-- Shared ai-engine destination presets are stored in the same persisted state file.
-- This state is shared by all users connected to the same deployed BFF instance.
-- The BFF is therefore not just a read API; it is also a small runtime operations state holder.
+- The BFF holds no persisted routing state. Upstream service URLs always come from the environment variables below.
+- The llama target override lives in `ai-engine` (`AI_ENGINE_LLAMA_TARGET_STATE_FILE`), not here.
 
 ## Dependencies and contracts
 
@@ -116,13 +105,8 @@ CI and image publication are documented in `docs/operations/README.md` and `../d
 
 ### Routing and security notes
 
-- Every routing target that is saved or applied (generic service-target overrides, ai-engine target, ai-engine presets and connections) is checked against `ALLOWED_ROUTING_TARGET_HOSTS` (hostnames, `*.suffix` wildcards, IPv4 CIDRs). Targets must use `http` or `https`.
-- Fail closed: when `ALLOWED_ROUTING_TARGET_HOSTS` is empty, overrides are denied unless `NODE_ENV` is `development` or `test` (where the service logs a warning at startup). Built-in seeded ai-engine presets still load. To point the ai-engine at an external host, add that host to the allowlist.
-- `API_GATEWAY_ADMIN_TOKEN` is declared in the configuration schema but is not currently read by any route.
-
-### Runtime routing overrides
-
-Overrides and presets are persisted in `BACKOFFICE_ROUTING_STATE_FILE` and can survive BFF restarts. Detailed allowlist and synchronization behavior is documented in the routing-control and diagnostics capability docs.
+- Every ai-engine target that is applied (`PUT /v1/backoffice/ai-engine/target`) is checked against `ALLOWED_ROUTING_TARGET_HOSTS` (hostnames, `*.suffix` wildcards, IPv4 CIDRs). Targets must use `http` or `https`.
+- Fail closed: when `ALLOWED_ROUTING_TARGET_HOSTS` is empty, target changes are denied unless `NODE_ENV` is `development` or `test` (where the service logs a warning at startup). To point the ai-engine at an external host, add that host to the allowlist.
 
 ## Documentation
 
@@ -133,8 +117,7 @@ Overrides and presets are persisted in `BACKOFFICE_ROUTING_STATE_FILE` and can s
 
 ### Failure boundaries
 
-- routing-state persistence failure
-- gateway synchronization failure that leaves local and effective targets diverged
+- ai-engine target synchronization failure (the `ai-engine` call fails and the change is reported as 400)
 - downstream diagnostics failure while control routes remain available
 - allowlist misconfiguration that blocks intended retargeting
 

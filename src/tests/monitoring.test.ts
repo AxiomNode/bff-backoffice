@@ -7,11 +7,9 @@ import path from "node:path";
 import Fastify from "fastify";
 
 import { monitoringRoutes } from "../app/routes/monitoring.js";
-import { RoutingStateStore } from "../app/services/routingStateStore.js";
 import { ServiceMetrics } from "../app/services/serviceMetrics.js";
 
 let tempDir = "";
-let stateFile = "";
 
 function createMetrics(bufferSize?: number) {
   return new ServiceMetrics({
@@ -23,7 +21,6 @@ function createMetrics(bufferSize?: number) {
 describe("monitoring routes", () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "axiomnode-bff-backoffice-monitoring-"));
-    stateFile = path.join(tempDir, "routing-state.json");
   });
 
   afterEach(async () => {
@@ -31,21 +28,11 @@ describe("monitoring routes", () => {
       await rm(tempDir, { recursive: true, force: true });
     }
     tempDir = "";
-    stateFile = "";
   });
 
   it("returns stats, bounded logs and prometheus metrics", async () => {
     const app = Fastify();
     const metrics = createMetrics(2);
-    const routingStore = new RoutingStateStore({ BACKOFFICE_ROUTING_STATE_FILE: stateFile } as never);
-
-    await routingStore.load();
-    await routingStore.set("microservice-users", {
-      baseUrl: "http://microservice-users:7102",
-      label: "cluster",
-      updatedAt: "2026-04-21T00:00:00.000Z",
-    });
-
     metrics.incrementInflight();
     metrics.recordIncomingRequest({
       method: "GET",
