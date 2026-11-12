@@ -1,0 +1,17 @@
+# BuildKit reads "<Dockerfile>.dockerignore" next to the Dockerfile. The build
+# context is the workspace root (CI checks out several repos side by side, and
+# docker-compose uses "context: .."), so a plain src/.dockerignore is never
+# applied. Patterns below are relative to that context root.
+**/.git
+**/.github
+**/node_modules
+**/dist
+**/coverage
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/tests
+**/docs
+**/*.md
+**/.coverage-agent.txt
