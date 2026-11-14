@@ -1,6 +1,6 @@
 # bff-backoffice
 
-Last updated: 2026-05-08.
+Last updated: 2026-11-14.
 
 [![codecov](https://codecov.io/gh/AxiomNode/bff-backoffice/branch/main/graph/badge.svg)](https://codecov.io/gh/AxiomNode/bff-backoffice)
 
@@ -22,7 +22,6 @@ flowchart LR
 	BFF --> Quiz[microservice-quizz]
 	BFF --> Wordpass[microservice-wordpass]
 	BFF --> AIStats[ai-engine stats target]
-	BFF -. sync .-> Gateway
 ```
 
 ### Main responsibilities
@@ -55,7 +54,7 @@ Operator-facing diagnostics semantics and runtime-control behavior are documente
 
 - `src/`: Fastify + TypeScript implementation.
 - `docs/`: architecture, guides, and operations docs.
-- `.github/workflows/ci.yml`: CI + deployment dispatch trigger.
+- `.github/workflows/ci.yml`: CI + `platform-infra` image-build dispatch (deploys are manual-only).
 
 ### Primary operational use cases
 
@@ -88,7 +87,7 @@ Primary downstream dependencies:
 - `microservice-quizz`
 - `microservice-wordpass`
 - `ai-engine-stats`
-- `api-gateway` administrative synchronization path
+- `api-gateway` (service metrics and logs reads through `API_GATEWAY_URL`; it holds no routing state)
 
 ## Deployment and operations notes
 

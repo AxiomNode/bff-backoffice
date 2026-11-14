@@ -1,6 +1,6 @@
 # Operations
 
-Last updated: 2026-05-08.
+Last updated: 2026-11-14.
 
 ## Scope
 
@@ -22,9 +22,9 @@ After startup, validate:
 - one monitor or leaderboard route
 - `GET /v1/backoffice/ai-engine/target` when the llama target control is used
 
-## Runtime-state checks
+## Llama target checks
 
-When targeting behavior is inconsistent, verify:
+When llama target behavior is inconsistent, verify:
 
 - effective llama target returned by `GET /v1/backoffice/ai-engine/target`
 - reachability of `ai-engine-api` `/internal/admin/llama-target`
@@ -32,6 +32,5 @@ When targeting behavior is inconsistent, verify:
 
 ## Common failure patterns
 
-- diagnostics healthy but control synchronization failing
-- local state updated while gateway-effective AI target remains stale
-- operator controls exposed but downstream target blocked by allowlist or auth hardening
+- diagnostics healthy but the call to `ai-engine-api` `/internal/admin/llama-target` failing (target change reported as `400`)
+- operator controls exposed but the target blocked by the allowlist or by `ai-engine-api` auth (`x-api-key`)

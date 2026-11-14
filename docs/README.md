@@ -1,6 +1,6 @@
 # bff-backoffice docs
 
-Last updated: 2026-05-08.
+Last updated: 2026-11-14.
 
 Technical documentation for the backoffice BFF service.
 
@@ -10,7 +10,7 @@ This local docs folder explains the concrete implementation surface of `bff-back
 
 - operator-facing orchestration behavior
 - the ai-engine llama target control and its allowlist
-- local operational workflow for diagnostics and targeting features
+- local operational workflow for diagnostics and llama target changes
 
 ## Navigation
 
@@ -22,7 +22,7 @@ This local docs folder explains the concrete implementation surface of `bff-back
 
 1. Start with `architecture/README.md`.
 2. Continue with `guides/README.md` when changing operator APIs.
-3. Use `operations/README.md` for local run and routing-state checks.
+3. Use `operations/README.md` for local run and llama target checks.
 
 ## When to use this
 
