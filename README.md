@@ -89,6 +89,10 @@ Primary downstream dependencies:
 - `ai-engine-stats`
 - `api-gateway` (service metrics and logs reads through `API_GATEWAY_URL`; it holds no routing state)
 
+Both game services are Deployments of one code base and image (`microservice-games`, formerly `microservice-quizz`): `microservice-quizz` runs it with `GAME_TYPE=quiz` and `microservice-wordpass` with `GAME_TYPE=word-pass`. Their Service names, ports and the variables below did not change; the BFF still addresses each game by host, never by a path prefix.
+
+For the history dataset insights it calls `GET /games/history/insights` on the game service (one server-side GROUP BY); a `404` or an unreadable body marks that service as unsupported for 5 minutes and the insights are built from history pages instead (`src/app/routes/backoffice.ts`).
+
 ## Deployment and operations notes
 
 ### CI/CD and rollout note
